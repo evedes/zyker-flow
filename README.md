@@ -41,7 +41,21 @@ content itself, is the real guarantee.
 | `flow abandon` | user | drop the active feature |
 
 The user runs their commands with the `!` prefix in Claude Code (e.g.
-`! plugins/flow/bin/flow approve spec`) or from a terminal.
+`! flow approve spec`) or from a terminal. `!` commands don't go through the
+hooks. A Claude slash command can't do this: it runs through the agent's
+tools, which the hook blocks by design.
+
+For the short form, put a wrapper on PATH that runs the current repo's copy:
+
+```sh
+#!/bin/sh
+# ~/.local/bin/flow
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
+exec "$root/plugins/flow/bin/flow" "$@"
+```
+
+Messages from the CLI and hooks say `flow` when one is on PATH, else the full
+repo path.
 
 ## Files
 
