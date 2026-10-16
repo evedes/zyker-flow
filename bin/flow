@@ -46,14 +46,73 @@ REVIEW_SECTIONS = ["verdict", "findings"]
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
-# A Bash command "writes" when it redirects into a file or runs a mutating tool.
+# A Bash command writes the file it redirects into, or the paths it names when it runs a
+# mutating tool. Both are judged per simple command (see bash_commands).
+REDIRECT = re.compile(r"(?<![<&>])\d?>{1,2}\s*['\"]?([^\s'\";&|()<>]+)")
 WRITE_HINT = re.compile(
-    r"(?<![0-9&])>|\btee\b|\bsed\s+(-\S*\s+)*-i|\bperl\s+(-\S*\s+)*-i|\brm\b|\bmv\b|\bcp\b|"
+    r"\btee\b|\bsed\s+(-\S*\s+)*-i|\bperl\s+(-\S*\s+)*-i|\brm\b|\bmv\b|\bcp\b|"
     r"\btouch\b|\btruncate\b|\bpatch\b|\bln\b|"
     r"\bgit\s+(checkout|restore|apply|stash|reset|mv|rm)\b"
 )
 # Commands that write source files without naming them.
-CODEGEN = re.compile(r"\bmix\s+(phx\.gen\.\S+|ecto\.gen\.\S+|format\b|igniter\.\S+)")
+CODEGEN = re.compile(
+    r"\bmix\s+(phx\.gen\.\S+|ecto\.gen\.\S+|format\b(?![^;&|\n]*--check-formatted)|igniter\.\S+)"
+)
+HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)(\w+)\2")
+
+
+def split_commands(text):
+    """Split shell text on unquoted &&, ||, ;, |, & and newlines."""
+    parts, cur, quote, i = [], [], None, 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            cur.append(c)
+            if c == "\\" and quote == '"' and i + 1 < len(text):
+                cur.append(text[i + 1])
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+            cur.append(c)
+        elif c == "\\" and i + 1 < len(text):
+            cur.append(text[i : i + 2])
+            i += 1
+        elif c in ";|&\n" and not (c == "&" and (text[i - 1 : i] in "<>" or text[i + 1 : i + 2] == ">")):
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def bash_commands(cmd):
+    """The simple commands in a Bash tool call. A heredoc fed to `cat` is data (its text
+    lands in the redirect target), so its body is dropped; any other heredoc body (a
+    script for python, sh, psql...) is kept as part of the command that reads it."""
+    lines, out, i = cmd.split("\n"), [], 0
+    while i < len(lines):
+        line, bodies = lines[i], []
+        i += 1
+        for m in HEREDOC.finditer(line):
+            body = []
+            while i < len(lines):
+                end = lines[i].lstrip("\t") if m.group(1) else lines[i]
+                i += 1
+                if end == m.group(3):
+                    break
+                body.append(lines[i - 1])
+            reader = split_commands(line[: m.start()])
+            if not (reader and re.match(r"(\w+=\S*\s+)*cat\b", reader[-1])):
+                bodies.append(" ".join(body))
+        cmds = split_commands(line)
+        if bodies and cmds:
+            cmds[-1] += " " + " ".join(bodies)
+        out.extend(cmds)
+    return out
 GIT_COMMIT = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*commit\b")
 GIT_PUSH = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*push\b")
 def flow_cmd(root):
@@ -69,7 +128,7 @@ def flow_cmd(root):
         return str(me)
 
 
-USER_ONLY_CMD = re.compile(r"\bflow\b[^;&|\n]*\s(" + "|".join(USER_ONLY) + r")\b")
+USER_ONLY_CMD = re.compile(r"(^|[\s'\"(=])(\S*/)?flow\s+(" + "|".join(USER_ONLY) + r")\b")
 
 
 class FlowError(Exception):
@@ -617,24 +676,33 @@ def hook_pre_tool_use(payload):
 
     if tool != "Bash":
         return 0
-    cmd = ti.get("command", "")
-    if USER_ONLY_CMD.search(cmd):
+    cmds = bash_commands(ti.get("command", ""))
+    if any(USER_ONLY_CMD.search(c) for c in cmds):
         return deny(f"approve/pause/resume/abandon are the user's: they run them as `! {flow_cmd(repo.root)} ...`")
-    writes = bool(WRITE_HINT.search(re.sub(r"\d*>\s*/dev/null|\d*>&\d", "", cmd)))
-    if writes and re.search(re.escape(repo.work_rel) + r"/(flow\.json|[^/\s]+/state\.json)", cmd):
+
+    names_state = re.compile(re.escape(repo.work_rel) + r"/(flow\.json|[^/\s]+/state\.json)")
+    writes_state = writes_code = codegen = False
+    for c in cmds:
+        c = re.sub(r"\d*>\s*/dev/null|\d*>&\d", "", c)
+        targets = [repo.rel(t) for t in REDIRECT.findall(c)]
+        mutates = bool(WRITE_HINT.search(c))
+        names_code = any(re.search(r"(^|[\s'\"=/.])" + re.escape(p) + r"(/|\b)", c) for p in repo.protected)
+        writes_state |= any(repo.is_state_file(t) for t in targets) or (mutates and bool(names_state.search(c)))
+        writes_code |= any(repo.is_protected(t) for t in targets) or (mutates and names_code)
+        codegen |= bool(CODEGEN.search(c))
+    if writes_state:
         return deny("state files are written only by the flow CLI")
     if paused:
         return 0
-    if GIT_COMMIT.search(cmd):
+    if any(GIT_COMMIT.search(c) for c in cmds):
         problem = commit_problem(repo)
         if problem:
             return deny(problem)
-    if GIT_PUSH.search(cmd):
+    if any(GIT_PUSH.search(c) for c in cmds):
         problem = push_problem(repo)
         if problem:
             return deny(problem)
-    names_code = any(re.search(r"(^|[\s'\"=/.])" + re.escape(p) + r"(/|\b)", cmd) for p in repo.protected)
-    if CODEGEN.search(cmd) or (writes and names_code):
+    if codegen or writes_code:
         problem = code_edit_problem(repo)
         if problem:
             return deny(problem)

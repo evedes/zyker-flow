@@ -203,6 +203,43 @@ class FlowTest(unittest.TestCase):
         self.assertIsNone(self.hook("Bash", command="grep -r hello lib/ 2>/dev/null"))
         self.assertIsNone(self.hook("Bash", command="ls lib/ >/dev/null 2>&1"))
 
+    def test_bash_hook_false_positives_are_allowed(self):
+        self.flow("new", "hello")
+        allowed = [
+            # Text written to a file outside the repo's code, via a cat heredoc.
+            "cat > /tmp/msg.txt <<'EOF'\nfix lib/app.ex and work/001-hello/state.json\nEOF",
+            "cd /x && cat <<EOF > /tmp/t.md\nsee mix.exs\nEOF\ngit status",
+            # A write and a read of code in separate commands.
+            "rm work/001-hello/notes.md && grep -n x lib/app.ex",
+            "grep -rn hello lib > /tmp/hits.txt",
+            # Appending a note that mentions a state file somewhere else.
+            'echo "- note on work/001-hello/state.json" >> /tmp/MEMORY.md',
+            # Read-only format check.
+            "mix format --check-formatted",
+            "mix compile --warnings-as-errors && mix format --check-formatted && mix test",
+            # Prose that mentions the user-only subcommands.
+            "git log --grep 'flow: the user runs approve'",
+        ]
+        for c in allowed:
+            self.assertIsNone(self.hook("Bash", command=c), c)
+
+    def test_bash_hook_still_catches_real_writes(self):
+        self.flow("new", "hello")
+        denied = {
+            "sed -i 's/a;b/c/' lib/app.ex": "phase explore",
+            "cat > lib/app.ex <<'EOF'\nx\nEOF": "phase explore",
+            "cd /x && echo y > lib/app.ex": "phase explore",
+            "cp /tmp/a lib/app.ex": "phase explore",
+            "bash -c 'rm -rf lib'": "phase explore",
+            "mix format": "phase explore",
+            "rm work/flow.json": "state files",
+            "cat > work/001-hello/state.json <<EOF\n{}\nEOF": "state files",
+            "bash -c 'flow approve spec'": "user's",
+            "FOO=1 flow resume": "user's",
+        }
+        for c, reason in denied.items():
+            self.assertIn(reason, self.hook("Bash", command=c) or "", c)
+
     def test_commit_gate(self):
         (self.root / "docs.md").write_text("docs\n")
         self.assertIsNone(self.hook("Bash", command="git commit -am docs"))
