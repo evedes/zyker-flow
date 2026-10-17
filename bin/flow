@@ -668,9 +668,10 @@ STACKS = [
 
 
 def deny_rules(work_rel):
-    """Permission rules backing up the hook: the user-only commands and the state files."""
+    """Permission rules backing up the hook: the user-only commands and the state files.
+    Edit(path) rules cover every file-editing tool; Claude Code ignores Write(path) ones."""
     return [f"Bash(flow {c}:*)" for c in USER_ONLY] + [
-        f"{tool}({work_rel}/{p})" for tool in ("Edit", "Write") for p in ("flow.json", "*/state.json")
+        f"Edit({work_rel}/{p})" for p in ("flow.json", "*/state.json")
     ]
 
 

@@ -335,8 +335,9 @@ class FlowTest(unittest.TestCase):
         self.assertIn(self.root.name, (self.root / "work" / "STANDING.md").read_text())
         deny = json.loads((self.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
         self.assertEqual(deny.count("Bash(flow approve:*)"), 1)
-        for rule in ("Bash(rm -rf:*)", "Bash(flow abandon:*)", "Write(work/*/state.json)"):
+        for rule in ("Bash(rm -rf:*)", "Bash(flow abandon:*)", "Edit(work/*/state.json)"):
             self.assertIn(rule, deny)
+        self.assertEqual([r for r in deny if r.startswith("Write(")], [])
         self.assertIn("already exists", self.flow("init", ok=False).stderr)
         self.flow("new", "hello")
         self.assertIn("phase explore", self.hook("Bash", command="mix phx.gen.live Blog Post posts"))
