@@ -126,9 +126,42 @@ In the plugin: `bin/flow` (Python 3, stdlib only), `hooks/hooks.json`,
 
 ## Installing
 
-Inside zyker it's wired through `.claude/settings.json` (hooks and deny rules)
-and `.claude/skills/flow` (a symlink to the skill). Hooks load at session
-start, so restart Claude Code after changing them.
+This repo is both the plugin and a one-plugin marketplace (`agile-flywheel`).
+Install it once and it serves every repo; the hooks do nothing in repos
+without a `.flow.json`:
+
+```sh
+claude plugin marketplace add ~/Work/agile-flywheel
+claude plugin install flow@agile-flywheel
+```
+
+A marketplace added from a local directory loads the plugin in place: commits
+here (and uncommitted edits) reach every session started afterwards, or after
+`/reload-plugins`. Added from a git URL instead (`claude plugin marketplace add
+<url>.git`, keeping the `.git`), it is copied into the plugin cache at a commit;
+pick up new commits with `claude plugin marketplace update agile-flywheel` and
+`claude plugin update flow@agile-flywheel`. To try a working copy for one
+session without installing: `claude --plugin-dir ~/Work/agile-flywheel`.
+
+The plugin brings the hooks, the skill, and `bin/` on the Bash tool's PATH.
+Two things stay per machine or per repo:
+
+- **`flow` for the user.** `!` commands and terminals aren't documented to get
+  the plugin's PATH, so put a wrapper on yours:
+  ```sh
+  #!/bin/sh
+  # ~/.local/bin/flow
+  exec "$HOME/Work/agile-flywheel/bin/flow" "$@"
+  ```
+- **Permission deny rules.** A plugin's settings can't set permissions, so
+  `flow init` writes them into the repo's `.claude/settings.json`. The hook
+  enforces the same things without them; they are a second layer.
+
+Don't also wire the hooks in a repo's own `.claude/settings.json`: plugin and
+project hooks both run, so every check would run twice.
+
+To opt a repo in, run `flow init` at its root, then edit `.flow.json` and
+`work/STANDING.md`.
 
 ## Tests
 

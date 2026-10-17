@@ -1,0 +1,12 @@
+{
+  "name": "agile-flywheel",
+  "owner": { "name": "Eduardo Vedes" },
+  "description": "flow: a phase-gated feature workflow for Claude Code",
+  "plugins": [
+    {
+      "name": "flow",
+      "source": ".",
+      "description": "Phase-gated feature workflow: explore, spec, tickets, build, review, ship, with deterministic gates enforced by hooks"
+    }
+  ]
+}

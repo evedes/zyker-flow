@@ -1,5 +1,7 @@
 {
   "name": "flow",
-  "version": "0.1.0",
-  "description": "Phase-gated feature workflow: explore, spec, tickets, build, review, ship, with deterministic gates enforced by hooks"
+  "description": "Phase-gated feature workflow: explore, spec, tickets, build, review, ship, with deterministic gates enforced by hooks",
+  "author": {
+    "name": "Eduardo Vedes"
+  }
 }
