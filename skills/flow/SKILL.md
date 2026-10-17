@@ -1,0 +1,64 @@
+---
+name: flow
+description: Phase-gated feature workflow (explore, spec, tickets, build, review, ship). Use whenever starting, continuing or shipping a feature in a repo with a .flow.json, when the user asks to build/add/change app behaviour, or when a flow hook denies an action.
+---
+
+# flow
+
+Features move through fixed phases. The `flow` CLI owns the state and the
+hooks enforce it, so the order is not up to you: code under the repo's
+protected paths can only be edited in **build**, and only committed in **ship**
+after the user approved spec and tickets, the gates passed, and review passed,
+all on the exact code being committed.
+
+```
+explore -> spec -> tickets -> build -> review -> ship -> done
+```
+
+Run the CLI as `flow` (plugin installed) or `plugins/flow/bin/flow` (repo-local).
+
+| Command | Who | What |
+|---|---|---|
+| `flow new <slug> "<title>"` | you | start a feature (one active at a time), scaffolds `research.md` |
+| `flow status` / `flow check` | you | where things are and what blocks the next phase |
+| `flow advance` | you | move on; refuses until `check` passes, scaffolds the next artifact |
+| `flow back` | you | return to the previous phase (e.g. review found a problem) |
+| `flow gates` | you | run standing gates + every ticket's Verification steps, record the result |
+| `flow deploy` | you | CI jobs for HEAD and the health check |
+| `flow approve spec\|tickets` | **user only** | sign off; stays valid until the file changes |
+| `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
+
+Never run the user-only commands, and never edit `work/flow.json` or
+`work/*/state.json`: the hooks deny both. When you need an approval, say so
+and ask the user to run `! flow approve <kind>`.
+
+## Phases
+
+All artifacts live in `work/<NNN-slug>/` and are committed with the feature.
+`TODO(flow)` marks unfilled template text; `flow check` fails while any remain.
+
+1. **explore** — fill `research.md`. Read the code before proposing anything;
+   use a subagent (Explore) for wide reading so findings come back distilled.
+   Put decisions only the user can make under `## Open questions` as `- [ ]`
+   items, then stop and ask. Tick them (`- [x]`) with the answer once given.
+2. **spec** — fill `spec.md`: the user-visible behaviour, data model, UI and
+   testable acceptance criteria, plus what is out of scope. Present it and ask
+   for `! flow approve spec`. Changing `spec.md` afterwards voids the approval.
+3. **tickets** — split the spec into `tickets/T01-<slug>.md`, `T02-…` from
+   the template. Every field the standing agreement (`work/STANDING.md`) doesn't
+   cover must be specific; `## Verification steps` holds the runnable commands
+   that prove the ticket (one per line, in a ``` block). Ask for
+   `! flow approve tickets`.
+4. **build** — per ticket, write the failing test from its acceptance criteria
+   first, then the code, then check it in the running app. When all tickets
+   are done, `flow gates` must pass. Any later code change makes the gates stale.
+5. **review** — dispatch a fresh subagent that did not write the code. Give it
+   `spec.md`, the tickets and `git diff`, and have it write `review.md`
+   (Verdict `pass`/`fail`, findings with file:line). On `fail`: `flow back`,
+   fix, `flow gates`, `flow advance`, review again.
+6. **ship** — commit code and the `work/` folder together, then push. The push
+   hook refuses while a CI/deploy run is in flight. Watch with `flow deploy`;
+   `flow advance` to **done** once CI is green for HEAD and the health check
+   returns 200.
+
+Work that touches no protected path (docs, CI, tooling) needs no feature.
