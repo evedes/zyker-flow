@@ -103,7 +103,7 @@ GIT_COMMIT = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*commit\b")
 GIT_PUSH = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*push\b")
 def flow_cmd(root):
     """How the user invokes this CLI: bare `flow` when one is on PATH (this file, or the
-    ~/.local/bin wrapper that dispatches to the repo's copy), else its repo path."""
+    ~/.local/bin wrapper that runs it), else its repo path."""
     import shutil
     me = Path(__file__).resolve()
     if shutil.which("flow"):
