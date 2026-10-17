@@ -1,6 +1,6 @@
 ---
 name: flow
-description: Phase-gated feature workflow (explore, spec, tickets, build, review, ship). Use whenever starting, continuing or shipping a feature in a repo with a .flow.json, when the user asks to build/add/change app behaviour, or when a flow hook denies an action.
+description: Phase-gated feature workflow (explore, spec, tickets, build, review, ship). Use in a repo with a .flow.json at its git root whenever starting, continuing or shipping a feature there (any request to build, add or change its behaviour), or when a flow hook denies an action.
 ---
 
 # flow
@@ -15,7 +15,9 @@ all on the exact code being committed.
 explore -> spec -> tickets -> build -> review -> ship -> done
 ```
 
-Run the CLI as `flow` (plugin installed) or `plugins/flow/bin/flow` (repo-local).
+Run the CLI as `flow` (the plugin puts it on PATH). The repo's `.flow.json`
+sets the protected paths, standing gates and work dir (`work_dir`, `work` by
+default; `<work>` below).
 
 | Command | Who | What |
 |---|---|---|
@@ -24,18 +26,21 @@ Run the CLI as `flow` (plugin installed) or `plugins/flow/bin/flow` (repo-local)
 | `flow advance` | you | move on; refuses until `check` passes, scaffolds the next artifact |
 | `flow back` | you | return to the previous phase (e.g. review found a problem) |
 | `flow gates` | you | run standing gates + every ticket's Verification steps, record the result |
-| `flow deploy` | you | CI jobs for HEAD and the health check |
+| `flow deploy` | you | CI runs for HEAD and the health check |
 | `flow approve spec\|tickets` | **user only** | sign off; stays valid until the file changes |
 | `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
 
-Never run the user-only commands, and never edit `work/flow.json` or
-`work/*/state.json`: the hooks deny both. When you need an approval, say so
+Never run the user-only commands, and never edit `<work>/flow.json` or
+`<work>/*/state.json`: the hooks deny both. When you need an approval, say so
 and ask the user to run `! flow approve <kind>`.
 
 ## Phases
 
-All artifacts live in `work/<NNN-slug>/` and are committed with the feature.
-`TODO(flow)` marks unfilled template text; `flow check` fails while any remain.
+All artifacts live in `<work>/<NNN-slug>/` and are committed with the feature.
+They are scaffolded from the repo's templates in `<work>/templates/` when it
+has them, else the plugin's. `TODO(flow)` marks unfilled template text;
+`flow check` fails while any remain, or while a section the template seeded
+with one is missing or empty.
 
 1. **explore** — fill `research.md`. Read the code before proposing anything;
    use a subagent (Explore) for wide reading so findings come back distilled.
@@ -45,9 +50,9 @@ All artifacts live in `work/<NNN-slug>/` and are committed with the feature.
    testable acceptance criteria, plus what is out of scope. Present it and ask
    for `! flow approve spec`. Changing `spec.md` afterwards voids the approval.
 3. **tickets** — split the spec into `tickets/T01-<slug>.md`, `T02-…` from
-   the template. Every field the standing agreement (`work/STANDING.md`) doesn't
-   cover must be specific; `## Verification steps` holds the runnable commands
-   that prove the ticket (one per line, in a ``` block). Ask for
+   the template. Every field the standing agreement (`<work>/STANDING.md`)
+   doesn't cover must be specific; `## Verification steps` holds the runnable
+   commands that prove the ticket (one per line, in a ``` block). Ask for
    `! flow approve tickets`.
 4. **build** — per ticket, write the failing test from its acceptance criteria
    first, then the code, then check it in the running app. When all tickets
@@ -56,9 +61,10 @@ All artifacts live in `work/<NNN-slug>/` and are committed with the feature.
    `spec.md`, the tickets and `git diff`, and have it write `review.md`
    (Verdict `pass`/`fail`, findings with file:line). On `fail`: `flow back`,
    fix, `flow gates`, `flow advance`, review again.
-6. **ship** — commit code and the `work/` folder together, then push. The push
-   hook refuses while a CI/deploy run is in flight. Watch with `flow deploy`;
-   `flow advance` to **done** once CI is green for HEAD and the health check
-   returns 200.
+6. **ship** — commit code and the `<work>` folder together. With a `deploy`
+   section in `.flow.json`, push too: the push hook refuses while a CI/deploy
+   run is in flight. Watch with `flow deploy`; `flow advance` to **done** once
+   CI is green for HEAD and the health check returns 200. Without one, ship
+   ends once everything is committed.
 
 Work that touches no protected path (docs, CI, tooling) needs no feature.

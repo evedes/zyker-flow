@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s plugins/flow/tests
 """
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -55,6 +56,12 @@ lib/app.ex exists.
 test -f lib/app.ex
 ```
 """
+# Elixir's code generators and formatter, as zyker configures them.
+MIX_CODEGEN = [
+    r"\bmix\s+(phx|ecto)\.gen\.\S",
+    r"\bmix\s+igniter\.\S",
+    r"\bmix\s+format\b(?!.*--check-formatted)",
+]
 REVIEW = """# Review: x
 ## Verdict
 pass — matches the spec.
@@ -74,10 +81,12 @@ class FlowTest(unittest.TestCase):
             "work_dir": "work",
             "protected_paths": ["lib/", "mix.exs"],
             "standing_gates": ["true"],
+            "codegen": MIX_CODEGEN,
         }))
         (self.root / "README.md").write_text("readme\n")
         self.git("add", "-A")
         self.git("commit", "-qm", "init")
+        self.env = None
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -87,7 +96,7 @@ class FlowTest(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, check=True).stdout
 
     def flow(self, *args, ok=True):
-        r = subprocess.run([str(FLOW), *args], cwd=self.root, capture_output=True, text=True)
+        r = subprocess.run([str(FLOW), *args], cwd=self.root, capture_output=True, text=True, env=self.env)
         if ok:
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r
@@ -95,7 +104,7 @@ class FlowTest(unittest.TestCase):
     def hook(self, tool, **tool_input):
         payload = {"cwd": str(self.root), "tool_name": tool, "tool_input": tool_input}
         r = subprocess.run([str(FLOW), "hook", "pre-tool-use"], input=json.dumps(payload),
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         if not r.stdout.strip():
             return None
@@ -132,6 +141,11 @@ class FlowTest(unittest.TestCase):
     def phase(self):
         return json.loads((self.fdir() / "state.json").read_text())["phase"]
 
+    def configure(self, **changes):
+        cfg = json.loads((self.root / ".flow.json").read_text())
+        cfg.update(changes)
+        (self.root / ".flow.json").write_text(json.dumps(cfg))
+
     # tests
     def test_new_scaffolds_research_and_blocks_code(self):
         self.flow("new", "hello", "Hello")
@@ -162,6 +176,29 @@ class FlowTest(unittest.TestCase):
         self.flow("advance")
         self.assertEqual(self.phase(), "tickets")
 
+    def test_default_templates_decide_the_required_sections(self):
+        self.flow("new", "hello")
+        (self.fdir() / "research.md").write_text(RESEARCH)
+        self.flow("advance")
+        (self.fdir() / "spec.md").write_text(SPEC.replace("## UI\nNone.\n", ""))
+        self.assertIn("'## ui' is missing", self.flow("check", ok=False).stdout)
+        (self.fdir() / "spec.md").write_text(SPEC.replace("## Open questions\nNone.\n", ""))
+        self.assertIn("approve spec", self.flow("check", ok=False).stdout)  # only the approval is missing
+
+    def test_repo_templates_override_the_plugin_ones(self):
+        own = self.root / "work" / "templates"
+        own.mkdir(parents=True)
+        (own / "spec.md").write_text("# Spec: {title}\n\n## Goal\nTODO(flow): goal\n\n"
+                                     "## Acceptance criteria\nTODO(flow): checks\n\n## Notes\n")
+        self.flow("new", "hello", "Hello")
+        (self.fdir() / "research.md").write_text(RESEARCH)
+        self.flow("advance")
+        self.assertIn("## Notes", (self.fdir() / "spec.md").read_text())
+        (self.fdir() / "spec.md").write_text("# Spec\n## Acceptance criteria\nHello is shown.\n")
+        self.assertIn("'## goal' is missing", self.flow("check", ok=False).stdout)
+        (self.fdir() / "spec.md").write_text("# Spec\n## Goal\nHi.\n## Acceptance criteria\nHello is shown.\n")
+        self.flow("approve", "spec")  # no data model or UI section needed
+
     def test_tickets_need_verification_commands(self):
         self.flow("new", "hello")
         (self.fdir() / "research.md").write_text(RESEARCH)
@@ -169,6 +206,7 @@ class FlowTest(unittest.TestCase):
         (self.fdir() / "spec.md").write_text(SPEC)
         self.flow("approve", "spec")
         self.flow("advance")
+        self.assertIn("from `work/STANDING.md`", (self.fdir() / "tickets" / "T01.md").read_text())
         no_cmds = TICKET.replace("test -f lib/app.ex", "")
         (self.fdir() / "tickets" / "T01.md").write_text(no_cmds)
         self.assertIn("no commands", self.flow("check", ok=False).stdout)
@@ -239,6 +277,69 @@ class FlowTest(unittest.TestCase):
         }
         for c, reason in denied.items():
             self.assertIn(reason, self.hook("Bash", command=c) or "", c)
+
+    def test_codegen_patterns_come_from_config(self):
+        self.flow("new", "hello")
+        self.configure(codegen=[])
+        self.assertIsNone(self.hook("Bash", command="mix phx.gen.live Blog Post posts"))
+        self.configure(codegen=[r"\bnpx\s+prisma\s+generate\b"])
+        self.assertIn("phase explore", self.hook("Bash", command="npx prisma generate"))
+        self.configure(codegen=["mix (phx"])
+        self.assertIn("codegen pattern 'mix (phx'", self.edit("README.md"))
+
+    def test_command_provider_gates_push(self):
+        self.configure(deploy={"provider": "command", "status_command": "cat runs.json"})
+        runs = self.root / "runs.json"
+        runs.write_text(json.dumps([{"name": "deploy", "status": "running", "head_sha": "abc1234"}]))
+        self.assertIn("deploy=running", self.hook("Bash", command="git push"))
+        runs.write_text(json.dumps([{"name": "deploy", "status": "success", "head_sha": "abc1234"}]))
+        self.assertIsNone(self.hook("Bash", command="git push"))
+        runs.write_text(json.dumps({"not": "a list"}))
+        self.assertIn("expected a list", self.hook("Bash", command="git push"))
+        self.assertIn("expected a list", self.flow("deploy", ok=False).stderr)
+
+    def test_github_provider_reads_gh_run_list(self):
+        bindir = self.root / ".bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text('#!/bin/sh\necho "$@" > "$0.args"\ncat "$0.json"\n')
+        gh.chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+        self.configure(deploy={"provider": "github", "repo": "edo/x"})
+        run = {"databaseId": 7, "name": "CI", "status": "in_progress", "conclusion": "", "headSha": "abc1234"}
+        (bindir / "gh.json").write_text(json.dumps([run]))
+        self.assertIn("CI=in_progress", self.hook("Bash", command="git push"))
+        self.assertIn("--repo edo/x", (bindir / "gh.args").read_text())
+        (bindir / "gh.json").write_text(json.dumps([{**run, "status": "completed", "conclusion": "failure"}]))
+        self.assertIsNone(self.hook("Bash", command="git push"))
+        self.assertIn("failure", self.flow("deploy").stdout)
+
+    def test_unknown_provider_is_reported(self):
+        self.configure(deploy={"provider": "jenkins"})
+        self.assertIn("deploy.provider", self.hook("Bash", command="git push"))
+        self.configure(deploy={"provider": "command"})
+        self.assertIn("status_command", self.hook("Bash", command="git push"))
+        self.configure(deploy={"forgejo_url": "http://127.0.0.1:9", "repo": "edo/x", "token_env": "NO_SUCH_TOKEN"})
+        self.assertIn("$NO_SUCH_TOKEN", self.hook("Bash", command="git push"))  # forgejo, from its keys
+
+    def test_init_opts_a_repo_in(self):
+        (self.root / ".flow.json").unlink()
+        (self.root / "mix.exs").write_text("defmodule X.MixProject do end\n")
+        (self.root / ".claude").mkdir()
+        (self.root / ".claude" / "settings.json").write_text(
+            json.dumps({"permissions": {"deny": ["Bash(rm -rf:*)", "Bash(flow approve:*)"]}}))
+        self.assertIn("defaults for mix.exs", self.flow("init").stdout)
+        cfg = json.loads((self.root / ".flow.json").read_text())
+        self.assertIn("lib/", cfg["protected_paths"])
+        self.assertIn("mix test", cfg["standing_gates"])
+        self.assertIn(self.root.name, (self.root / "work" / "STANDING.md").read_text())
+        deny = json.loads((self.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
+        self.assertEqual(deny.count("Bash(flow approve:*)"), 1)
+        for rule in ("Bash(rm -rf:*)", "Bash(flow abandon:*)", "Write(work/*/state.json)"):
+            self.assertIn(rule, deny)
+        self.assertIn("already exists", self.flow("init", ok=False).stderr)
+        self.flow("new", "hello")
+        self.assertIn("phase explore", self.hook("Bash", command="mix phx.gen.live Blog Post posts"))
 
     def test_commit_gate(self):
         (self.root / "docs.md").write_text("docs\n")

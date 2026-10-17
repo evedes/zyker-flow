@@ -7,10 +7,10 @@ TODO(flow): the outcome for the user, in a few sentences.
 TODO(flow): what the user sees and can do, step by step, including empty and error states.
 
 ## Data model
-TODO(flow): schemas, migrations and contexts that change, or "None."
+TODO(flow): schemas, migrations and stored data that change, or "None."
 
 ## UI
-TODO(flow): pages and ZykerWeb.UI components needed (new ones included), or "None."
+TODO(flow): screens, pages and components needed (new ones included), or "None."
 
 ## Acceptance criteria
 TODO(flow): testable statements; each becomes a test or an observable check in a ticket.

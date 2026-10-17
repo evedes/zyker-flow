@@ -1,6 +1,6 @@
 # T01: TODO(flow): imperative, specific title
 
-Inherits the standing Definition of Ready and Definition of Done from `work/STANDING.md`.
+Inherits the standing Definition of Ready and Definition of Done from `{work_dir}/STANDING.md`.
 Copy this file to `T02-<slug>.md` and so on for each further ticket.
 
 ## Description / desired end state
@@ -25,7 +25,7 @@ TODO(flow): surfaces this ticket must not touch.
 ## Depends on
 
 ## Gate
-TODO(flow): the pass/fail bar as runnable or observable checks, e.g. "test/zyker_web/live/foo_live_test.exs covers the empty state and passes".
+TODO(flow): the pass/fail bar as runnable or observable checks, e.g. "the test for the empty state exists and passes".
 
 ## Verification steps
 ```sh

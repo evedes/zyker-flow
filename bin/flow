@@ -9,8 +9,8 @@ Only this CLI writes them; the PreToolUse hook (`flow hook pre-tool-use`)
 stops the agent from editing them, from running the user-only commands, and
 from editing code, committing or pushing out of phase.
 
-Repos opt in with a `.flow.json` at the git root; everywhere else the hooks
-do nothing.
+Repos opt in with a `.flow.json` at the git root (`flow init` writes one);
+everywhere else the hooks do nothing.
 """
 
 import hashlib
@@ -29,20 +29,10 @@ USER_ONLY = ("approve", "pause", "resume", "abandon")
 APPROVABLE = ("spec", "tickets")
 PLACEHOLDER = "TODO(flow)"
 TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
-IN_FLIGHT = {"running", "waiting", "blocked"}
-
-RESEARCH_SECTIONS = ["question", "findings", "options", "open questions"]
-SPEC_SECTIONS = ["goal", "behaviour", "data model", "ui", "acceptance criteria", "out of scope"]
-TICKET_SECTIONS = [
-    "description / desired end state",
-    "context / why",
-    "entry points",
-    "in scope",
-    "out of scope",
-    "gate",
-    "verification steps",
-]
-REVIEW_SECTIONS = ["verdict", "findings"]
+# CI run statuses, across providers: anything not in flight or passed is a failure.
+IN_FLIGHT = {"running", "waiting", "blocked", "queued", "pending", "requested", "in_progress"}
+PASSED = {"success", "skipped"}
+PROVIDERS = ("forgejo", "github", "command")
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
@@ -53,10 +43,6 @@ WRITE_HINT = re.compile(
     r"\btee\b|\bsed\s+(-\S*\s+)*-i|\bperl\s+(-\S*\s+)*-i|\brm\b|\bmv\b|\bcp\b|"
     r"\btouch\b|\btruncate\b|\bpatch\b|\bln\b|"
     r"\bgit\s+(checkout|restore|apply|stash|reset|mv|rm)\b"
-)
-# Commands that write source files without naming them.
-CODEGEN = re.compile(
-    r"\bmix\s+(phx\.gen\.\S+|ecto\.gen\.\S+|format\b(?![^;&|\n]*--check-formatted)|igniter\.\S+)"
 )
 HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)(\w+)\2")
 
@@ -157,14 +143,31 @@ def run_git(root, *args):
     return r.stdout
 
 
-def find_root(start):
+def git_root(start):
     r = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], cwd=start, capture_output=True, text=True
     )
+    return Path(r.stdout.strip()) if r.returncode == 0 else None
+
+
+def find_root(start):
+    root = git_root(start)
+    return root if root and (root / ".flow.json").is_file() else None
+
+
+def run_json(cmd, cwd, what):
+    """Run a command (a list, or a string for the shell) and parse its stdout as JSON."""
+    try:
+        r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), capture_output=True,
+                           text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise FlowError(f"{what} failed: {e}")
     if r.returncode != 0:
-        return None
-    root = Path(r.stdout.strip())
-    return root if (root / ".flow.json").is_file() else None
+        raise FlowError(f"{what} failed (exit {r.returncode}): {r.stderr.strip()[:200]}")
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        raise FlowError(f"{what} did not print JSON")
 
 
 # --- markdown checks ---------------------------------------------------------
@@ -225,6 +228,22 @@ class Repo:
         self.work = self.root / self.config.get("work_dir", "work")
         self.work_rel = self.work.relative_to(self.root).as_posix()
         self.protected = [p.rstrip("/") for p in self.config.get("protected_paths", [])]
+        # Commands that write code without naming the files (generators, formatters).
+        self.codegen = []
+        for p in self.config.get("codegen", []):
+            try:
+                self.codegen.append(re.compile(p))
+            except re.error as e:
+                raise FlowError(f".flow.json codegen pattern {p!r}: {e}")
+
+    # templates: the repo's own in <work_dir>/templates/, else the plugin's
+    def template(self, name):
+        own = self.work / "templates" / name
+        return (own if own.is_file() else TEMPLATES / name).read_text()
+
+    def required_sections(self, name):
+        """The sections a template seeds with a placeholder must be filled in."""
+        return [s for s, body in sections(self.template(name)).items() if PLACEHOLDER in body]
 
     # global + feature state
     def load_global(self):
@@ -327,24 +346,49 @@ class Repo:
         g = st.get("gates")
         return bool(g) and g.get("passed") and g.get("fingerprint") == self.fingerprint()
 
-    # deploy (Forgejo)
+    # deploy: CI runs from the configured provider, as {id, name, status, head_sha}
     def deploy_cfg(self):
         return self.config.get("deploy")
 
-    def forgejo(self, path):
+    def runs(self, limit=30):
         cfg = self.deploy_cfg()
-        token = os.environ.get(cfg.get("token_env", "FORGEJO_TOKEN"), "")
+        provider = cfg.get("provider") or ("forgejo" if "forgejo_url" in cfg else None)
+        if provider == "forgejo":
+            runs = self.forgejo(cfg, f"/actions/tasks?limit={limit}").get("workflow_runs", [])
+        elif provider == "github":
+            cmd = ["gh", "run", "list", "--limit", str(limit),
+                   "--json", "databaseId,name,status,conclusion,headSha"]
+            if cfg.get("repo"):
+                cmd += ["--repo", cfg["repo"]]
+            runs = [{"id": r["databaseId"], "name": r["name"], "head_sha": r["headSha"],
+                     "status": r["conclusion"] if r["status"] == "completed" else r["status"]}
+                    for r in run_json(cmd, self.root, "gh run list")]
+        elif provider == "command":
+            if not cfg.get("status_command"):
+                raise FlowError("deploy.provider command needs a deploy.status_command")
+            runs = run_json(cfg["status_command"], self.root, "deploy.status_command")
+        else:
+            raise FlowError(f"deploy.provider must be one of {', '.join(PROVIDERS)}")
+        try:
+            return [{"id": r.get("id", ""), "name": r["name"], "status": r["status"],
+                     "head_sha": r["head_sha"]} for r in runs]
+        except (KeyError, TypeError, AttributeError):
+            raise FlowError(f"{provider}: expected a list of {{name, status, head_sha}}")
+
+    def forgejo(self, cfg, path):
+        token_env = cfg.get("token_env", "FORGEJO_TOKEN")
+        token = os.environ.get(token_env, "")
         if not token:
-            raise FlowError(f"${cfg.get('token_env')} is not set; cannot read Forgejo")
+            raise FlowError(f"${token_env} is not set; cannot read Forgejo")
         req = urllib.request.Request(
             f"{cfg['forgejo_url'].rstrip('/')}/api/v1/repos/{cfg['repo']}{path}",
             headers={"Authorization": f"token {token}"},
         )
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.load(r)
-
-    def tasks(self, limit=30):
-        return self.forgejo(f"/actions/tasks?limit={limit}").get("workflow_runs", [])
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.load(r)
+        except OSError as e:
+            raise FlowError(f"cannot read Forgejo: {e}")
 
     def health(self):
         url = self.deploy_cfg().get("health_url")
@@ -367,10 +411,10 @@ class Repo:
 def check(repo, fid, st):
     d, phase, problems = repo.fdir(fid), st["phase"], []
     if phase == "explore":
-        problems += check_doc(d / "research.md", RESEARCH_SECTIONS)
+        problems += check_doc(d / "research.md", repo.required_sections("research.md"))
         problems += unchecked_boxes(d / "research.md", "open questions")
     elif phase == "spec":
-        problems += check_doc(d / "spec.md", SPEC_SECTIONS)
+        problems += check_doc(d / "spec.md", repo.required_sections("spec.md"))
         problems += unchecked_boxes(d / "spec.md", "open questions")
         if not problems and not repo.approval_valid(fid, st, "spec"):
             problems.append(f"spec.md needs the user's approval: `! {flow_cmd(repo.root)} approve spec`")
@@ -378,9 +422,10 @@ def check(repo, fid, st):
         files = repo.tickets(fid)
         if not files:
             problems.append("tickets/: no tickets yet")
+        required = repo.required_sections("ticket.md")
         for t in files:
             label = f"tickets/{t.name}"
-            problems += check_doc(t, TICKET_SECTIONS, label)
+            problems += check_doc(t, required, label)
             if t.is_file() and not gate_commands(t):
                 problems.append(f"{label}: '## Verification steps' has no commands in a ``` block")
         if not problems and not repo.approval_valid(fid, st, "tickets"):
@@ -389,7 +434,7 @@ def check(repo, fid, st):
         if not repo.gates_current(st):
             problems.append("gates have not passed on the current code: run `flow gates`")
     elif phase == "review":
-        problems += check_doc(d / "review.md", REVIEW_SECTIONS)
+        problems += check_doc(d / "review.md", repo.required_sections("review.md"))
         verdict = sections((d / "review.md").read_text()).get("verdict", "") if (d / "review.md").is_file() else ""
         if not re.match(r"^\W*pass\b", verdict, re.I):
             problems.append("review.md: '## Verdict' does not start with 'pass'")
@@ -418,14 +463,14 @@ def ship_problems(repo):
         problems.append(f"HEAD is not on origin/{branch} yet: push it")
         return problems
     try:
-        mine = [t for t in repo.tasks() if t.get("head_sha") == head]
+        mine = [t for t in repo.runs() if t["head_sha"] == head]
     except FlowError as e:
         return problems + [str(e)]
     if not mine:
         problems.append(f"no CI jobs for {head[:7]} yet")
     elif any(t["status"] in IN_FLIGHT for t in mine):
         problems.append("deploy still running: " + ", ".join(f"{t['name']}={t['status']}" for t in mine))
-    elif any(t["status"] not in ("success", "skipped") for t in mine):
+    elif any(t["status"] not in PASSED for t in mine):
         problems.append("CI failed: " + ", ".join(f"{t['name']}={t['status']}" for t in mine))
     status = repo.health()
     if status is not None and status != 200:
@@ -440,8 +485,8 @@ def scaffold(repo, fid, st, name, dest=None):
     dest = dest or repo.fdir(fid) / name
     if dest.exists():
         return
-    text = (TEMPLATES / name).read_text()
-    text = text.replace("{title}", st["title"]).replace("{id}", fid)
+    text = repo.template(name)
+    text = text.replace("{title}", st["title"]).replace("{id}", fid).replace("{work_dir}", repo.work_rel)
     if "{fingerprint}" in text:
         text = text.replace("{fingerprint}", (st.get("gates") or {}).get("fingerprint", "?"))
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -580,8 +625,8 @@ def cmd_deploy(repo, args):
     if not repo.deploy_cfg():
         raise FlowError("no deploy config in .flow.json")
     head = run_git(repo.root, "rev-parse", "HEAD").strip()
-    for t in repo.tasks(15):
-        mark = "*" if t.get("head_sha") == head else " "
+    for t in repo.runs(15):
+        mark = "*" if t["head_sha"] == head else " "
         print(f"{mark} {t['id']} {t['name']:<14} {t['status']:<9} {t['head_sha'][:7]}")
     print(f"health: {repo.health()}")
 
@@ -602,6 +647,58 @@ def cmd_abandon(repo, args):
     g["active"] = None
     repo.save_global(g)
     print(f"{fid} abandoned")
+
+
+# Starting points for `flow init`, keyed by the file that marks the stack: protected paths,
+# standing gates and codegen patterns. They are guesses the repo edits in .flow.json.
+STACKS = [
+    ("mix.exs", ["lib/", "test/", "config/", "priv/", "assets/", "mix.exs", "mix.lock"],
+     ["mix compile --warnings-as-errors", "mix format --check-formatted", "mix test"],
+     [r"\bmix\s+(phx|ecto)\.gen\.\S", r"\bmix\s+igniter\.\S", r"\bmix\s+format\b(?!.*--check-formatted)"]),
+    ("Cargo.toml", ["src/", "tests/", "Cargo.toml", "Cargo.lock"],
+     ["cargo fmt --check", "cargo clippy -- -D warnings", "cargo test"],
+     [r"\bcargo\s+fmt\b(?!.*--check)"]),
+    ("pyproject.toml", ["src/", "tests/", "pyproject.toml"],
+     ["python -m pytest"],
+     [r"\bruff\s+format\b(?!.*--check)", r"\bblack\b(?!.*--check)"]),
+    ("package.json", ["src/", "test/", "package.json", "package-lock.json"],
+     ["npm test"],
+     [r"\bprettier\b.*--write", r"\beslint\b.*--fix"]),
+]
+
+
+def deny_rules(work_rel):
+    """Permission rules backing up the hook: the user-only commands and the state files."""
+    return [f"Bash(flow {c}:*)" for c in USER_ONLY] + [
+        f"{tool}({work_rel}/{p})" for tool in ("Edit", "Write") for p in ("flow.json", "*/state.json")
+    ]
+
+
+def cmd_init(root, args):
+    if (root / ".flow.json").exists():
+        raise FlowError(".flow.json already exists")
+    settings = root / ".claude" / "settings.json"
+    try:
+        s = json.loads(settings.read_text()) if settings.is_file() else {}
+    except json.JSONDecodeError:
+        raise FlowError(f"{settings} is not plain JSON; nothing written")
+    stack = next((x for x in STACKS if (root / x[0]).is_file()), None)
+    marker, protected, gates, codegen = stack or (None, ["src/"], [], [])
+    write_json(root / ".flow.json", {"work_dir": "work", "protected_paths": protected,
+                                     "standing_gates": gates, "codegen": codegen})
+    repo = Repo(root)
+    standing = repo.work / "STANDING.md"
+    if not standing.exists():
+        standing.parent.mkdir(parents=True, exist_ok=True)
+        standing.write_text(repo.template("STANDING.md").replace("{project}", root.name)
+                            .replace("{work_dir}", repo.work_rel))
+    deny = s.setdefault("permissions", {}).setdefault("deny", [])
+    deny += [r for r in deny_rules(repo.work_rel) if r not in deny]
+    write_json(settings, s)
+    print(f"wrote .flow.json ({f'defaults for {marker}' if marker else 'no known stack: guessed'}),"
+          f" {repo.work_rel}/STANDING.md and deny rules in .claude/settings.json")
+    print("next: check protected_paths, standing_gates and codegen in .flow.json, fill in"
+          f" {repo.work_rel}/STANDING.md, and add a deploy section if ship should wait for CI")
 
 
 # --- hooks ---------------------------------------------------------------------
@@ -648,7 +745,7 @@ def push_problem(repo):
     if not cfg:
         return None
     try:
-        running = [t for t in repo.tasks() if t["status"] in IN_FLIGHT]
+        running = [t for t in repo.runs() if t["status"] in IN_FLIGHT]
     except (FlowError, OSError) as e:
         return f"cannot check whether a deploy is running ({e})"
     if running:
@@ -689,7 +786,7 @@ def hook_pre_tool_use(payload):
         names_code = any(re.search(r"(^|[\s'\"=/.])" + re.escape(p) + r"(/|\b)", c) for p in repo.protected)
         writes_state |= any(repo.is_state_file(t) for t in targets) or (mutates and bool(names_state.search(c)))
         writes_code |= any(repo.is_protected(t) for t in targets) or (mutates and names_code)
-        codegen |= bool(CODEGEN.search(c))
+        codegen |= any(p.search(c) for p in repo.codegen)
     if writes_state:
         return deny("state files are written only by the flow CLI")
     if paused:
@@ -752,15 +849,22 @@ def main(argv):
             if argv[1] == "pre-tool-use":
                 return deny(f"hook error: {e}")
             return 0
-    if not argv or argv[0] not in COMMANDS:
+    if not argv or argv[0] not in ("init", *COMMANDS):
         print(__doc__.strip().split("\n\n")[0])
-        print("\ncommands: " + ", ".join(COMMANDS))
+        print("\ncommands: " + ", ".join(("init", *COMMANDS)))
         return 0 if not argv else 2
-    root = find_root(os.getcwd())
-    if not root:
-        print("flow: no .flow.json at the git root; this repo does not use flow", file=sys.stderr)
-        return 2
     try:
+        if argv[0] == "init":
+            root = git_root(os.getcwd())
+            if not root:
+                raise FlowError("not inside a git repository")
+            cmd_init(root, argv[1:])
+            return 0
+        root = find_root(os.getcwd())
+        if not root:
+            print("flow: no .flow.json at the git root; this repo does not use flow (`flow init` opts it in)",
+                  file=sys.stderr)
+            return 2
         COMMANDS[argv[0]](Repo(root), argv[1:])
     except FlowError as e:
         print(f"flow: {e}", file=sys.stderr)

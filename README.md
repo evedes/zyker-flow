@@ -8,16 +8,18 @@ explore -> spec -> tickets -> build -> review -> ship -> done
 
 The order is enforced by code, not by instructions: the `flow` CLI owns the
 state, and a `PreToolUse` hook asks it before every edit and Bash command.
+Repos opt in with a `.flow.json` at the git root; everywhere else the hooks do
+nothing.
 
 ## What is enforced
 
 | Rule | Where |
 |---|---|
-| Code under `protected_paths` is edited only in **build** (Edit/Write tools, Bash writes, code generators like `mix phx.gen.*`) | hook |
+| Code under `protected_paths` is edited only in **build** (Edit/Write tools, Bash writes, `codegen` commands) | hook |
 | Code is committed only in **ship**, with both approvals valid, gates passed and review passed **on the exact code being committed** (content fingerprint) | hook on `git commit` |
-| No `git push` while a CI/deploy run is in flight | hook on `git push` (Forgejo API) |
+| No `git push` while a CI/deploy run is in flight | hook on `git push` (the `deploy` provider) |
 | Spec and tickets need the user's approval; editing them afterwards voids it (content hash) | CLI |
-| A phase can't be left until its artifact is complete: required sections filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
+| A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
 | The agent can't run `approve`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
 
 Changes that touch no protected path (docs, CI, tooling) are never blocked.
@@ -31,11 +33,12 @@ content itself, is the real guarantee.
 
 | Command | Who | What |
 |---|---|---|
+| `flow init` | anyone | opt the repo in: `.flow.json`, `<work_dir>/STANDING.md`, deny rules |
 | `flow new <slug> "<title>"` | agent | start a feature (one active at a time) |
 | `flow status`, `flow check` | anyone | where things are, what blocks the next phase |
 | `flow advance`, `flow back` | agent | move forward (when `check` passes) or back one phase |
 | `flow gates` | agent | run standing gates + every ticket's verification commands |
-| `flow deploy` | anyone | CI jobs for HEAD and the health check |
+| `flow deploy` | anyone | CI runs for HEAD and the health check |
 | `flow approve spec\|tickets` | user | approve the current artifact |
 | `flow pause`, `flow resume` | user | suspend or restore enforcement (state files stay protected) |
 | `flow abandon` | user | drop the active feature |
@@ -45,44 +48,78 @@ The user runs their commands with the `!` prefix in Claude Code (e.g.
 hooks. A Claude slash command can't do this: it runs through the agent's
 tools, which the hook blocks by design.
 
-For the short form, put a wrapper on PATH that runs the current repo's copy:
+Messages from the CLI and hooks say `flow` when one is on PATH, else the full
+path.
 
-```sh
-#!/bin/sh
-# ~/.local/bin/flow
-root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
-exec "$root/plugins/flow/bin/flow" "$@"
+## `.flow.json`
+
+```json
+{
+  "work_dir": "work",
+  "protected_paths": ["lib/", "test/", "mix.exs"],
+  "standing_gates": ["mix test"],
+  "codegen": ["\\bmix\\s+(phx|ecto)\\.gen\\.\\S", "\\bmix\\s+format\\b(?!.*--check-formatted)"],
+  "deploy": {
+    "provider": "forgejo",
+    "branch": "main",
+    "forgejo_url": "http://odin:3000",
+    "repo": "edo/zyker",
+    "token_env": "FORGEJO_CLAUDE_PAT",
+    "health_url": "https://zyker.dev/health"
+  }
+}
 ```
 
-Messages from the CLI and hooks say `flow` when one is on PATH, else the full
-repo path.
+| Key | Meaning |
+|---|---|
+| `work_dir` | where feature records live (default `work`) |
+| `protected_paths` | path prefixes that count as code |
+| `standing_gates` | shell commands `flow gates` runs, before every ticket's verification commands |
+| `codegen` | regexes for commands that write code without naming the files (generators, formatters); each is matched against one simple command at a time |
+| `deploy` | optional; without it the push check and the ship→done CI check are skipped |
+
+`flow init` fills in `protected_paths`, `standing_gates` and `codegen` for
+Elixir (`mix.exs`), Rust (`Cargo.toml`), Python (`pyproject.toml`) and Node
+(`package.json`). They are starting points: check them.
+
+### Deploy providers
+
+| `provider` | Keys | Runs come from |
+|---|---|---|
+| `forgejo` (the default when `forgejo_url` is set) | `forgejo_url`, `repo`, `token_env` (default `FORGEJO_TOKEN`) | Forgejo's `/actions/tasks` API, one entry per job |
+| `github` | `repo` (optional: `gh` infers it from the remote) | `gh run list`, one entry per workflow run; needs `gh auth login` |
+| `command` | `status_command` | a shell command, run at the git root, that prints a JSON list of `{"name", "status", "head_sha"}` (`"id"` optional) |
+
+Every provider also takes `branch` (default `main`) and `health_url`
+(optional; it must answer 200 before ship→done). Statuses `running`,
+`waiting`, `blocked`, `queued`, `pending`, `requested` and `in_progress` are in
+flight, `success` and `skipped` pass, anything else is a failure.
+
+## Templates
+
+`research.md`, `spec.md`, `ticket.md` and `review.md` are scaffolded from
+`templates/` (and `STANDING.md` by `flow init`). A repo overrides any of them
+with a file of the same name in `<work_dir>/templates/`.
+
+The template decides what `flow check` requires: every `##` section it seeds
+with a `TODO(flow)` placeholder must be present and filled in. `{title}`,
+`{id}`, `{work_dir}` and, in `review.md`, `{fingerprint}` are substituted when
+scaffolding. The CLI reads a few sections by name, so overrides should keep
+them: `## Open questions` (research and spec; unticked `- [ ]` items block
+advancing), `## Verification steps` (tickets; the commands in its ``` block)
+and `## Verdict` (review; must start with `pass`).
 
 ## Files
 
 Per repo:
 
-- `.flow.json` at the git root opts the repo in (hooks are no-ops elsewhere):
-  ```json
-  {
-    "work_dir": "work",
-    "protected_paths": ["lib/", "test/", "mix.exs"],
-    "standing_gates": ["mix test"],
-    "deploy": {
-      "branch": "main",
-      "forgejo_url": "http://odin:3000",
-      "repo": "edo/zyker",
-      "token_env": "FORGEJO_CLAUDE_PAT",
-      "health_url": "https://zyker.dev/health"
-    }
-  }
-  ```
-  `deploy` is optional; without it the push check and the ship→done deploy
-  check are skipped.
-- `work/STANDING.md`: the standing Definition of Ready/Done every ticket
-  inherits (layer 1 of the agent ticket template).
-- `work/flow.json` (active feature, paused flag) and `work/<NNN-slug>/`:
-  `state.json`, `research.md`, `spec.md`, `tickets/T01-*.md`, `review.md`.
-  Committed with the feature, as its record.
+- `.flow.json` at the git root.
+- `<work_dir>/STANDING.md`: the standing Definition of Ready/Done every ticket
+  inherits.
+- `<work_dir>/templates/` (optional): template overrides.
+- `<work_dir>/flow.json` (active feature, paused flag) and
+  `<work_dir>/<NNN-slug>/`: `state.json`, `research.md`, `spec.md`,
+  `tickets/T01-*.md`, `review.md`. Committed with the feature, as its record.
 
 In the plugin: `bin/flow` (Python 3, stdlib only), `hooks/hooks.json`,
 `skills/flow/SKILL.md` (how the agent runs each phase), `templates/`.
@@ -90,17 +127,11 @@ In the plugin: `bin/flow` (Python 3, stdlib only), `hooks/hooks.json`,
 ## Installing
 
 Inside zyker it's wired through `.claude/settings.json` (hooks and deny rules)
-and `.claude/skills/flow` (a symlink to the skill), because loading a plugin
-from a directory inside the repo isn't clearly documented yet. Hooks load at
-session start, so restart Claude Code after changing them.
-
-To reuse it elsewhere, either copy that wiring, or move `plugins/flow` into its
-own repo with a `.claude-plugin/marketplace.json` and install it as a plugin
-(`hooks/hooks.json` and `bin/` on PATH then come with it). Don't do both in
-one repo, or every hook runs twice.
+and `.claude/skills/flow` (a symlink to the skill). Hooks load at session
+start, so restart Claude Code after changing them.
 
 ## Tests
 
 ```sh
-python3 -m unittest discover -s plugins/flow/tests
+python3 -m unittest discover -s tests
 ```
