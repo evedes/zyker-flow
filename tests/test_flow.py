@@ -1,6 +1,6 @@
 """End-to-end tests for the flow CLI and its hooks, against a throwaway git repo.
 
-Run: python3 -m unittest discover -s plugins/flow/tests
+Run: python3 -m unittest discover -s tests
 """
 
 import json
@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 FLOW = Path(__file__).resolve().parent.parent / "bin" / "flow"
+SMOKE = Path(__file__).resolve().parent.parent / "scripts" / "smoke"
 
 RESEARCH = """# Research: x
 ## Question
@@ -396,6 +397,31 @@ class FlowTest(unittest.TestCase):
         ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("001-hello", ctx)
         self.assertIn("explore", ctx)
+
+    def smoke(self, *args):
+        return subprocess.run([str(SMOKE), *args, str(self.root)], capture_output=True, text=True)
+
+    def test_smoke_passes_whatever_the_state(self):
+        for step in (None, self.to_build, lambda: self.flow("back"), lambda: self.flow("pause")):
+            if step:
+                step()
+            r = self.smoke()
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_smoke_catches_a_broken_hook(self):
+        self.flow("new", "hello")
+        stubs = tempfile.TemporaryDirectory()
+        self.addCleanup(stubs.cleanup)
+        crash = """echo '{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "flow: hook error: boom"}}'"""
+        for name, body, expected in (("crashing", crash, "hook error: boom"),
+                                     ("permissive", "true", "allowed, expected denied")):
+            stub = Path(stubs.name) / name
+            stub.write_text(f'#!/bin/sh\nif [ "$1 $2" = "hook pre-tool-use" ]; then cat >/dev/null; {body}; exit 0; fi\n'
+                            f'exec "{FLOW}" "$@"\n')
+            stub.chmod(0o755)
+            r = self.smoke("--flow", str(stub))
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn(expected, r.stdout)
 
 
 if __name__ == "__main__":

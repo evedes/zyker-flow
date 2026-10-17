@@ -12,7 +12,8 @@ and how repos use it. `CLAUDE.md` is a symlink to this file.
   hooks end to end against throwaway git repos. Add one for every behaviour change.
 - The plugin is installed from this directory in place, so a change here is
   live in every flow repo's next session. A hook that raises denies every
-  tool call there (`hook error: ...`), so run the tests before leaving
+  tool call there (`hook error: ...`), so run the tests and `scripts/smoke`
+  (the hooks against every `~/Work` repo with a `.flow.json`) before leaving
   `bin/flow` in a new state.
 - `.claude-plugin/plugin.json` has no `version` on purpose: installed from a
   git URL, the version is then the commit, so updates aren't held back by an

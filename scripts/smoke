@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Smoke-test flow against the real repos that use it.
+
+Runs this checkout's bin/flow (or --flow PATH) in every repo with a .flow.json in
+~/Work (or in the repos given): `flow status`, the session-start hook, and the
+pre-tool-use hook on a fixed set of tool calls. Each call's expected verdict follows
+from that repo's own .flow.json and state. Nothing is written: `status` and the hooks
+only read.
+
+Usage: scripts/smoke [--flow PATH] [REPO ...]
+"""
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+FLOW = Path(__file__).resolve().parent.parent / "bin" / "flow"
+TIMEOUT = 120
+
+
+def run(cmd, cwd, stdin=""):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, input=stdin, capture_output=True, text=True, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {TIMEOUT}s"
+    if r.returncode != 0 or "Traceback" in r.stderr:
+        return None, f"exit {r.returncode}: " + (r.stderr.strip() or r.stdout.strip())[-400:]
+    return r.stdout, None
+
+
+def hook(flow, root, event, **payload):
+    """The hook's JSON output (None when it printed nothing), or an error string."""
+    out, err = run([str(flow), "hook", event], root, json.dumps({"cwd": str(root), **payload}))
+    if err:
+        return None, err
+    if not out.strip():
+        return None, None
+    try:
+        return json.loads(out)["hookSpecificOutput"], None
+    except (ValueError, KeyError, TypeError):
+        return None, f"not hook output: {out.strip()[:200]}"
+
+
+def cases(root):
+    """(label, tool, tool_input, should_deny) for this repo's config and state."""
+    cfg = json.loads((root / ".flow.json").read_text())
+    work = cfg.get("work_dir", "work")
+    g = root / work / "flow.json"
+    g = json.loads(g.read_text()) if g.is_file() else {}
+    phase = None
+    if g.get("active"):
+        phase = json.loads((root / work / g["active"] / "state.json").read_text())["phase"]
+    code_open = bool(g.get("paused")) or phase == "build"
+
+    out = [
+        ("edit a file outside protected_paths", "Edit", {"file_path": str(root / "flow-smoke.txt")}, False),
+        ("write a state file", "Write", {"file_path": str(root / work / "flow.json"), "content": "{}"}, True),
+        ("run a read-only command", "Bash", {"command": "git status"}, False),
+        ("run a user-only command", "Bash", {"command": "flow approve spec"}, True),
+    ]
+    protected = cfg.get("protected_paths", [])
+    if protected:
+        p = protected[0]
+        code = p.rstrip("/") + "/flow-smoke.txt" if p.endswith("/") or (root / p).is_dir() else p
+        out += [
+            (f"edit {code}", "Edit", {"file_path": str(root / code)}, not code_open),
+            (f"redirect into {code}", "Bash", {"command": f"echo x > {code}"}, not code_open),
+        ]
+    return out
+
+
+def smoke(flow, root):
+    """Check one repo; returns the number of failures."""
+    failures = 0
+
+    def report(ok, label, detail=""):
+        nonlocal failures
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label}" + (f": {detail}" if detail else ""))
+
+    print(f"{root.name} ({root})")
+    out, err = run([str(flow), "status"], root)
+    report(not err, "flow status", err or out.strip().splitlines()[0])
+
+    res, err = hook(flow, root, "session-start")
+    ctx = (res or {}).get("additionalContext", "")
+    report(not err and ctx.startswith("flow:"), "session-start hook", err or ctx or "no context")
+
+    try:
+        checks = cases(root)
+    except (OSError, ValueError, KeyError) as e:
+        report(False, "read .flow.json and state", str(e))
+        return failures
+    for label, tool, tool_input, should_deny in checks:
+        res, err = hook(flow, root, "pre-tool-use", tool_name=tool, tool_input=tool_input)
+        reason = (res or {}).get("permissionDecisionReason", "")
+        denied = (res or {}).get("permissionDecision") == "deny"
+        if err or "hook error" in reason:
+            report(False, label, err or reason)
+        else:
+            got = f"denied ({reason})" if denied else "allowed"
+            report(denied == should_deny, label, got if denied == should_deny
+                   else f"{got}, expected {'denied' if should_deny else 'allowed'}")
+    return failures
+
+
+def main(argv):
+    flow = FLOW
+    if argv[:1] == ["--flow"]:
+        if len(argv) < 2:
+            print(__doc__.strip().splitlines()[-1], file=sys.stderr)
+            return 2
+        flow, argv = Path(argv[1]).resolve(), argv[2:]
+    roots = [Path(a).resolve() for a in argv] or sorted(p.parent for p in Path.home().glob("Work/*/.flow.json"))
+    if not roots:
+        print("no repos with a .flow.json in ~/Work", file=sys.stderr)
+        return 2
+    print(f"flow: {flow}\n")
+    failures = 0
+    for root in roots:
+        if not (root / ".flow.json").is_file():
+            print(f"{root}: no .flow.json\n")
+            failures += 1
+            continue
+        failures += smoke(flow, root)
+        print()
+    print(f"{len(roots)} repo{'s' * (len(roots) != 1)}, {failures} failure{'s' * (failures != 1)}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -167,4 +167,13 @@ To opt a repo in, run `flow init` at its root, then edit `.flow.json` and
 
 ```sh
 python3 -m unittest discover -s tests
+scripts/smoke
 ```
+
+The plugin is live in every repo as soon as a change is saved here, so
+`scripts/smoke` checks the change against the real ones: it runs this
+checkout's `bin/flow` in every `~/Work` repo with a `.flow.json` (or the repos
+given as arguments; `--flow PATH` tries another copy), runs `flow status` and
+the session-start hook, and feeds the pre-tool-use hook a few tool calls whose
+verdict follows from that repo's config and state. It only reads, so it is safe
+mid-feature. A `hook error` or a wrong verdict fails it.
