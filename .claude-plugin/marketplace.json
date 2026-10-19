@@ -1,5 +1,5 @@
 {
-  "name": "agile-flywheel",
+  "name": "zyker-flow",
   "owner": { "name": "Eduardo Vedes" },
   "description": "flow: a phase-gated feature workflow for Claude Code",
   "plugins": [

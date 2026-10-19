@@ -44,7 +44,11 @@ WRITE_HINT = re.compile(
     r"\btouch\b|\btruncate\b|\bpatch\b|\bln\b|"
     r"\bgit\s+(checkout|restore|apply|stash|reset|mv|rm)\b"
 )
-HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)(\w+)\2")
+# `<<<` is a here-string and `<<` inside $((...)) a shift; neither starts a heredoc.
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)(\w+)\2")
+ARITH = re.compile(r"\$?\(\(.*?\)\)")
+# The rest of the line pipes the command's output on (`| sh`, `|& sh`, not `||`).
+PIPED = re.compile(r"[^;&|]*\|(?!\|)")
 
 
 def split_commands(text):
@@ -78,12 +82,14 @@ def split_commands(text):
 def bash_commands(cmd):
     """The simple commands in a Bash tool call. A heredoc fed to `cat` is data (its text
     lands in the redirect target), so its body is dropped; any other heredoc body (a
-    script for python, sh, psql...) is kept as part of the command that reads it."""
+    script for python, sh, psql..., or for whatever `cat` pipes it to) is kept as part of
+    the last command on its line."""
     lines, out, i = cmd.split("\n"), [], 0
     while i < len(lines):
         line, bodies = lines[i], []
         i += 1
-        for m in HEREDOC.finditer(line):
+        scan = ARITH.sub(lambda a: " " * len(a.group()), line)  # same offsets as line
+        for m in HEREDOC.finditer(scan):
             body = []
             while i < len(lines):
                 end = lines[i].lstrip("\t") if m.group(1) else lines[i]
@@ -92,7 +98,7 @@ def bash_commands(cmd):
                     break
                 body.append(lines[i - 1])
             reader = split_commands(line[: m.start()])
-            if not (reader and re.match(r"(\w+=\S*\s+)*cat\b", reader[-1])):
+            if PIPED.match(scan[m.end():]) or not (reader and re.match(r"(\w+=\S*\s+)*cat\b", reader[-1])):
                 bodies.append(" ".join(body))
         cmds = split_commands(line)
         if bodies and cmds:
@@ -101,17 +107,72 @@ def bash_commands(cmd):
     return out
 GIT_COMMIT = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*commit\b")
 GIT_PUSH = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*push\b")
+# `git commit` options that take a value, and those that commit more than the index.
+COMMIT_VALUE_OPTS = {"-m", "-F", "-C", "-c", "-t", "--message", "--file", "--author", "--date",
+                     "--template", "--reuse-message", "--reedit-message", "--fixup", "--squash",
+                     "--cleanup", "--trailer"}
+COMMIT_WIDENS = {"--all", "--include", "--only", "--interactive", "--patch", "--pathspec-from-file"}
+
+
+def commits_index_only(cmds):
+    """True when the Bash call is a lone `git commit` that takes only what is staged: no
+    other command (a `git add` before it would stage more, as would one in a `$(...)`,
+    backtick or `<(...)` substitution), no -a/-i/-o/-p, no pathspec."""
+    import shlex
+    if len(cmds) != 1 or any(s in cmds[0] for s in ("$(", "`", "<(", ">(")):
+        return False
+    try:
+        words = shlex.split(cmds[0])
+    except ValueError:
+        return False
+    if words[:2] != ["git", "commit"]:
+        return False
+    rest = iter(words[2:])
+    for w in rest:
+        if w.startswith("--"):
+            name = w.split("=", 1)[0]
+            if w == "--" or name in COMMIT_WIDENS:
+                return False
+            if name in COMMIT_VALUE_OPTS and "=" not in w:
+                next(rest, None)
+        elif w.startswith("-") and len(w) > 1:
+            for j, ch in enumerate(w[1:], 1):
+                if ch in "aiop":
+                    return False
+                if "-" + ch in COMMIT_VALUE_OPTS:
+                    if j == len(w) - 1:
+                        next(rest, None)
+                    break
+        else:
+            return False  # a pathspec
+    return True
+
+
 def flow_cmd(root):
-    """How the user invokes this CLI: bare `flow` when one is on PATH (this file, or the
-    ~/.local/bin wrapper that runs it), else its repo path."""
+    """How the user invokes this CLI: bare `flow` when the one on PATH is this file or a
+    wrapper that runs it (like the ~/.local/bin one), else its path."""
     import shutil
     me = Path(__file__).resolve()
-    if shutil.which("flow"):
+    found = shutil.which("flow")
+    if found and runs_me(Path(found), me):
         return "flow"
     try:
         return me.relative_to(Path(root).resolve()).as_posix()
     except ValueError:
         return str(me)
+
+
+def runs_me(path, me):
+    """Whether `path` is this file, or a short script naming it (`exec "$HOME/.../bin/flow"`)."""
+    if path.resolve() == me:
+        return True
+    try:
+        with open(path, "rb") as f:
+            text = f.read(4096).decode(errors="ignore")
+    except OSError:
+        return False
+    return any(Path(os.path.expanduser(os.path.expandvars(w))).resolve() == me
+               for w in re.findall(r"[^\s'\"]*/bin/flow\b", text))
 
 
 USER_ONLY_CMD = re.compile(r"(^|[\s'\"(=])(\S*/)?flow\s+(" + "|".join(USER_ONLY) + r")\b")
@@ -235,6 +296,21 @@ class Repo:
                 self.codegen.append(re.compile(p))
             except re.error as e:
                 raise FlowError(f".flow.json codegen pattern {p!r}: {e}")
+        # Bash words that name code or a state file (see path_ref).
+        self.code_ref = self.path_ref("|".join(re.escape(p) for p in self.protected))
+        self.state_ref = self.path_ref(re.escape(self.work_rel) + r"/(?:flow\.json|[^/\s'\"]+/state\.json)")
+
+    def path_ref(self, alts):
+        """A regex for a word naming one of `alts` (repo-relative paths): as written, or after
+        `./`, `$PWD/` or the root's absolute path, and ending there or at a `/`. So
+        `/tmp/lib/x` doesn't name `lib/`, nor `src-old` `src`."""
+        if not alts:
+            return None
+        roots = {self.root.as_posix(), self.root.resolve().as_posix()}
+        home = os.path.expanduser("~")
+        roots |= {"~" + r[len(home):] for r in roots if r.startswith(home + "/")}
+        prefix = "|".join([r"\./", r"\$PWD/", r"\$\{PWD\}/", r"\$\(pwd\)/"] + [re.escape(r + "/") for r in roots])
+        return re.compile(r"(?:^|[\s'\"=])(?:" + prefix + r")*(?:" + alts + r")(?=[/*?\s'\";&|()<>]|$)")
 
     # templates: the repo's own in <work_dir>/templates/, else the plugin's
     def template(self, name):
@@ -264,7 +340,13 @@ class Repo:
 
     def active(self):
         fid = self.load_global().get("active")
-        return (fid, self.load_state(fid)) if fid else (None, None)
+        if not fid:
+            return None, None
+        if not (self.fdir(fid) / "state.json").is_file():
+            raise FlowError(f"active feature {fid} has no {self.work_rel}/{fid}/state.json (removed by"
+                            f" `git clean` or `git stash`?): restore it, or the user can"
+                            f" `! {flow_cmd(self.root)} abandon` to clear it")
+        return fid, self.load_state(fid)
 
     def require_active(self):
         fid, st = self.active()
@@ -324,6 +406,10 @@ class Repo:
                         paths.append(entries[i])
             i += 1
         return paths
+
+    def staged_paths(self):
+        out = run_git(self.root, "diff", "--cached", "--name-only", "--no-renames", "-z")
+        return [p for p in out.split("\0") if p]
 
     # artifacts
     def tickets(self, fid):
@@ -408,15 +494,25 @@ class Repo:
 # --- phase checks --------------------------------------------------------------
 
 
-def check(repo, fid, st):
-    d, phase, problems = repo.fdir(fid), st["phase"], []
+def stale_approvals(repo, fid, st):
+    """Approvals given in an earlier phase whose artifact has changed since."""
+    i = PHASES.index(st["phase"])
+    return [f"{kind} changed since it was approved: restore it, or `flow back` to {kind}"
+            f" and ask for a new approval"
+            for kind in APPROVABLE if PHASES.index(kind) < i and not repo.approval_valid(fid, st, kind)]
+
+
+def check(repo, fid, st, own_approval=True):
+    """What blocks leaving the current phase; `flow approve` asks without own_approval."""
+    d, phase = repo.fdir(fid), st["phase"]
+    problems = stale_approvals(repo, fid, st)
     if phase == "explore":
         problems += check_doc(d / "research.md", repo.required_sections("research.md"))
         problems += unchecked_boxes(d / "research.md", "open questions")
     elif phase == "spec":
         problems += check_doc(d / "spec.md", repo.required_sections("spec.md"))
         problems += unchecked_boxes(d / "spec.md", "open questions")
-        if not problems and not repo.approval_valid(fid, st, "spec"):
+        if own_approval and not problems and not repo.approval_valid(fid, st, "spec"):
             problems.append(f"spec.md needs the user's approval: `! {flow_cmd(repo.root)} approve spec`")
     elif phase == "tickets":
         files = repo.tickets(fid)
@@ -428,7 +524,7 @@ def check(repo, fid, st):
             problems += check_doc(t, required, label)
             if t.is_file() and not gate_commands(t):
                 problems.append(f"{label}: '## Verification steps' has no commands in a ``` block")
-        if not problems and not repo.approval_valid(fid, st, "tickets"):
+        if own_approval and not problems and not repo.approval_valid(fid, st, "tickets"):
             problems.append(f"tickets need the user's approval: `! {flow_cmd(repo.root)} approve tickets`")
     elif phase == "build":
         if not repo.gates_current(st):
@@ -441,13 +537,14 @@ def check(repo, fid, st):
         if not repo.gates_current(st):
             problems.append("code changed since the gates passed: `flow back`, fix, `flow gates`")
     elif phase == "ship":
-        problems += ship_problems(repo)
+        problems += ship_problems(repo, fid)
     return problems
 
 
-def ship_problems(repo):
-    problems = []
-    dirty = [p for p in repo.changed_paths() if not p.startswith(repo.work_rel + "/")]
+def ship_problems(repo, fid):
+    # The feature's folder is its record and lands with the code; the rest of work_dir needn't.
+    problems, own = [], f"{repo.work_rel}/{fid}/"
+    dirty = [p for p in repo.changed_paths() if not p.startswith(repo.work_rel + "/") or p.startswith(own)]
     if dirty:
         problems.append(f"uncommitted changes: {', '.join(dirty[:5])}")
     cfg = repo.deploy_cfg()
@@ -497,6 +594,9 @@ def cmd_new(repo, args):
     if len(args) < 1:
         raise FlowError('usage: flow new <slug> ["<title>"]')
     slug = re.sub(r"[^a-z0-9-]+", "-", args[0].lower()).strip("-")
+    slug = re.sub(r"^\d{3}-", "", slug)  # flow numbers features itself
+    if not slug:
+        raise FlowError(f"slug {args[0]!r} has no letters or digits to name the feature by")
     title = args[1] if len(args) > 1 else slug.replace("-", " ").capitalize()
     g = repo.load_global()
     if g.get("active"):
@@ -557,9 +657,16 @@ def cmd_advance(repo, args):
     nxt = PHASES[PHASES.index(st["phase"]) + 1]
     if nxt == "spec":
         scaffold(repo, fid, st, "spec.md")
-    elif nxt == "tickets":
+    elif nxt == "tickets" and not repo.tickets(fid):  # back from a later phase: keep them
         scaffold(repo, fid, st, "ticket.md", repo.fdir(fid) / "tickets" / "T01.md")
     elif nxt == "review":
+        # Each round reviews the code as it is now: an earlier verdict is kept as review-N.md.
+        review = repo.fdir(fid) / "review.md"
+        if review.exists():
+            n = 1
+            while (repo.fdir(fid) / f"review-{n}.md").exists():
+                n += 1
+            review.rename(repo.fdir(fid) / f"review-{n}.md")
         scaffold(repo, fid, st, "review.md")
     elif nxt == "ship":
         st["reviewed_fingerprint"] = repo.fingerprint()
@@ -591,7 +698,7 @@ def cmd_approve(repo, args):
     kind = args[0]
     if st["phase"] != kind:
         raise FlowError(f"{kind} can only be approved in phase {kind} (now {st['phase']})")
-    problems = [p for p in check(repo, fid, st) if "approval" not in p]
+    problems = check(repo, fid, st, own_approval=False)
     if problems:
         raise FlowError(f"{kind} is not complete:\n" + "\n".join(f"- {p}" for p in problems))
     st.setdefault("approvals", {})[kind] = {"hash": repo.artifact_hash(fid, kind), "at": now()}
@@ -601,8 +708,12 @@ def cmd_approve(repo, args):
 
 def cmd_gates(repo, args):
     fid, st = repo.require_active()
-    if st["phase"] not in ("build", "review"):
-        raise FlowError(f"gates run in build or review (now {st['phase']})")
+    # Not in review: rerunning them there would let code the review never saw reach ship.
+    if st["phase"] != "build":
+        raise FlowError(f"gates run in build (now {st['phase']})")
+    stale = stale_approvals(repo, fid, st)
+    if stale:
+        raise FlowError("gates run only on the approved spec and tickets:\n" + "\n".join(f"- {p}" for p in stale))
     cmds = [("standing", c) for c in repo.config.get("standing_gates", [])]
     for t in repo.tickets(fid):
         cmds += [(t.stem, c) for c in gate_commands(t)]
@@ -639,11 +750,15 @@ def cmd_pause(repo, args, paused=True):
 
 
 def cmd_abandon(repo, args):
-    fid, st = repo.require_active()
-    st["phase"] = "abandoned"
-    st["history"].append({"phase": "abandoned", "at": now()})
-    repo.save_state(fid, st)
     g = repo.load_global()
+    fid = g.get("active")
+    if not fid:
+        raise FlowError("no active feature")
+    if (repo.fdir(fid) / "state.json").is_file():  # gone if git clean removed the feature
+        st = repo.load_state(fid)
+        st["phase"] = "abandoned"
+        st["history"].append({"phase": "abandoned", "at": now()})
+        repo.save_state(fid, st)
     g["active"] = None
     repo.save_global(g)
     print(f"{fid} abandoned")
@@ -723,8 +838,9 @@ def code_edit_problem(repo):
     return None
 
 
-def commit_problem(repo):
-    touched = [p for p in repo.changed_paths() if repo.is_protected(p)]
+def commit_problem(repo, index_only=False):
+    paths = repo.staged_paths() if index_only else repo.changed_paths()
+    touched = [p for p in paths if repo.is_protected(p)]
     if not touched:
         return None
     fid, st = repo.active()
@@ -778,14 +894,13 @@ def hook_pre_tool_use(payload):
     if any(USER_ONLY_CMD.search(c) for c in cmds):
         return deny(f"approve/pause/resume/abandon are the user's: they run them as `! {flow_cmd(repo.root)} ...`")
 
-    names_state = re.compile(re.escape(repo.work_rel) + r"/(flow\.json|[^/\s]+/state\.json)")
     writes_state = writes_code = codegen = False
     for c in cmds:
         c = re.sub(r"\d*>\s*/dev/null|\d*>&\d", "", c)
         targets = [repo.rel(t) for t in REDIRECT.findall(c)]
         mutates = bool(WRITE_HINT.search(c))
-        names_code = any(re.search(r"(^|[\s'\"=/.])" + re.escape(p) + r"(/|\b)", c) for p in repo.protected)
-        writes_state |= any(repo.is_state_file(t) for t in targets) or (mutates and bool(names_state.search(c)))
+        names_code = bool(repo.code_ref and repo.code_ref.search(c))
+        writes_state |= any(repo.is_state_file(t) for t in targets) or (mutates and bool(repo.state_ref.search(c)))
         writes_code |= any(repo.is_protected(t) for t in targets) or (mutates and names_code)
         codegen |= any(p.search(c) for p in repo.codegen)
     if writes_state:
@@ -793,7 +908,7 @@ def hook_pre_tool_use(payload):
     if paused:
         return 0
     if any(GIT_COMMIT.search(c) for c in cmds):
-        problem = commit_problem(repo)
+        problem = commit_problem(repo, commits_index_only(cmds))
         if problem:
             return deny(problem)
     if any(GIT_PUSH.search(c) for c in cmds):
@@ -812,13 +927,19 @@ def hook_session_start(payload):
     if not root:
         return 0
     repo = Repo(root)
-    fid, st = repo.active()
     g = repo.load_global()
+    broken = None
+    try:
+        fid, st = repo.active()
+    except FlowError as e:  # the active feature's state is missing
+        fid, broken = None, f"flow: {e}."
     if fid:
         problems = check(repo, fid, st) if st["phase"] != "ship" else []
         ctx = f"flow: active feature {fid} ({st['title']}) is in phase {st['phase']}."
         if problems:
             ctx += " To advance: " + "; ".join(problems)
+    elif broken:
+        ctx = broken
     else:
         ctx = f"flow: no active feature. Code changes start with `{flow_cmd(repo.root)} new <slug> \"<title>\"`."
     if g.get("paused"):

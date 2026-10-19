@@ -258,6 +258,13 @@ class FlowTest(unittest.TestCase):
             "mix compile --warnings-as-errors && mix format --check-formatted && mix test",
             # Prose that mentions the user-only subcommands.
             "git log --grep 'flow: the user runs approve'",
+            # Paths that only look like code: outside the repo, or a longer name.
+            "rm -rf /tmp/lib/cache",
+            "cp README.md /tmp/lib/README.md",
+            "rm mix.exs.bak",
+            "rm /tmp/work/flow.json",
+            # A cat heredoc that isn't piped on is data.
+            "cat <<EOF || true\nrm lib/app.ex\nEOF",
         ]
         for c in allowed:
             self.assertIsNone(self.hook("Bash", command=c), c)
@@ -275,6 +282,18 @@ class FlowTest(unittest.TestCase):
             "cat > work/001-hello/state.json <<EOF\n{}\nEOF": "state files",
             "bash -c 'flow approve spec'": "user's",
             "FOO=1 flow resume": "user's",
+            # Neither a here-string nor a shift starts a heredoc that hides the next lines.
+            "cat <<< foo\necho x > lib/app.ex": "phase explore",
+            "echo $((1<<2))\necho x > lib/app.ex": "phase explore",
+            "echo $(( 1 << 2 ))\nrm lib/app.ex": "phase explore",
+            # A cat heredoc piped to a shell is a script.
+            "cat <<EOF | sh\nrm lib/app.ex\nEOF": "phase explore",
+            "cat <<'EOF' |& bash\nrm -rf lib\nEOF": "phase explore",
+            # Code named through ./, $PWD/ or the root's absolute path.
+            "rm -rf ./lib": "phase explore",
+            "rm $PWD/lib/app.ex": "phase explore",
+            f"rm {self.root}/lib/app.ex": "phase explore",
+            f"rm {self.root}/work/flow.json": "state files",
         }
         for c, reason in denied.items():
             self.assertIn(reason, self.hook("Bash", command=c) or "", c)
@@ -367,6 +386,116 @@ class FlowTest(unittest.TestCase):
         self.assertIn("Verdict", self.flow("advance", ok=False).stderr)
         self.flow("back")
         self.assertEqual(self.phase(), "build")
+
+    def test_code_changed_after_ship_needs_a_new_review(self):
+        self.to_ship()
+        self.flow("back")
+        self.flow("back")
+        (self.root / "lib" / "app.ex").write_text("never reviewed\n")
+        self.flow("gates")
+        self.flow("advance")
+        self.assertIn("pass", (self.fdir() / "review-1.md").read_text())  # the old round, kept
+        self.assertIn("TODO(flow)", self.flow("advance", ok=False).stderr)
+        (self.fdir() / "review.md").write_text(REVIEW)
+        self.flow("advance")
+        self.assertEqual(self.phase(), "ship")
+
+    def test_back_to_spec_keeps_the_tickets(self):
+        self.to_build()
+        tickets = self.fdir() / "tickets"
+        (tickets / "T01.md").rename(tickets / "T01-hello.md")
+        self.flow("back")
+        self.flow("back")
+        self.flow("advance")
+        self.assertEqual([t.name for t in tickets.glob("*.md")], ["T01-hello.md"])
+
+    def test_approved_artifacts_changed_later_block_gates_and_advance(self):
+        self.to_build()
+        ticket = self.fdir() / "tickets" / "T01.md"
+        ticket.write_text(TICKET.replace("test -f lib/app.ex", "true"))
+        self.assertIn("tickets changed since it was approved", self.flow("gates", ok=False).stderr)
+        ticket.write_text(TICKET)
+        (self.fdir() / "spec.md").write_text(SPEC + "\nchanged\n")
+        self.assertIn("spec changed since it was approved", self.flow("check", ok=False).stdout)
+        self.flow("back")
+        self.assertIn("spec changed", self.flow("approve", "tickets", ok=False).stderr)
+
+    def test_approve_checks_sections_named_approval(self):
+        own = self.root / "work" / "templates"
+        own.mkdir(parents=True)
+        (own / "spec.md").write_text("## Goal\nTODO(flow): goal\n\n## Approval notes\nTODO(flow): who\n")
+        self.flow("new", "hello")
+        (self.fdir() / "research.md").write_text(RESEARCH)
+        self.flow("advance")
+        (self.fdir() / "spec.md").write_text("## Goal\nHi.\n")
+        self.assertIn("'## approval notes' is missing", self.flow("approve", "spec", ok=False).stderr)
+
+    def test_missing_state_of_the_active_feature_is_reported(self):
+        self.flow("new", "hello")
+        self.git("add", "work/flow.json")
+        self.git("commit", "-qm", "track flow.json")
+        self.git("clean", "-fdq", "work/")
+        self.assertIn("has no work/001-hello/state.json", self.flow("status", ok=False).stderr)
+        self.assertIn("abandon", self.edit("lib/app.ex"))
+        r = subprocess.run([str(FLOW), "hook", "session-start"], input=json.dumps({"cwd": str(self.root)}),
+                           capture_output=True, text=True)
+        self.assertIn("has no work/001-hello/state.json",
+                      json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"])
+        self.flow("abandon")
+        self.flow("new", "next")
+
+    def test_new_numbers_the_slug_itself(self):
+        self.flow("new", "003-hello-there")
+        self.assertTrue((self.root / "work" / "001-hello-there").is_dir())
+        self.flow("abandon")
+        self.assertIn("no letters or digits", self.flow("new", "!!!", ok=False).stderr)
+
+    def test_commit_of_staged_docs_is_allowed_mid_feature(self):
+        self.to_build()
+        (self.root / "lib").mkdir(exist_ok=True)
+        (self.root / "lib" / "app.ex").write_text("wip\n")
+        (self.root / "README.md").write_text("more docs\n")
+        self.git("add", "README.md")
+        self.assertIsNone(self.hook("Bash", command="git commit -m 'docs: more'"))
+        self.assertIsNone(self.hook("Bash", command="git commit -qm docs --author='a <a@b>'"))
+        for c in ("git commit -am docs", "git commit -m docs lib/app.ex", "git commit -m docs -- README.md",
+                  "git add -A && git commit -m docs", "git commit -p -m docs", "git commit --all -m x",
+                  'git commit -m "$(git add -A)"', "git commit -m `git add -A`", "git commit -F <(git add -A)"):
+            self.assertIn("committed only in ship", self.hook("Bash", command=c) or "", c)
+        self.git("add", "lib/app.ex")
+        self.assertIn("committed only in ship", self.hook("Bash", command="git commit -m docs"))
+
+    def test_gates_run_only_in_build(self):
+        self.to_build()
+        (self.root / "lib").mkdir(exist_ok=True)
+        (self.root / "lib" / "app.ex").write_text("hello\n")
+        self.flow("gates")
+        self.flow("advance")
+        (self.fdir() / "review.md").write_text(REVIEW)
+        (self.root / "README.md").write_text("changed after the review\n")
+        self.assertIn("gates run in build", self.flow("gates", ok=False).stderr)
+        self.assertIn("code changed since the gates passed", self.flow("advance", ok=False).stderr)
+
+    def test_ship_needs_the_feature_folder_committed(self):
+        self.to_ship()
+        self.git("add", "lib")
+        self.git("commit", "-qm", "code only")
+        self.assertIn("work/001-hello/", self.flow("advance", ok=False).stderr)
+        self.git("add", "work")
+        self.git("commit", "-qm", "record")
+        self.flow("advance")
+        self.assertEqual(self.phase(), "done")
+
+    def test_messages_name_flow_only_when_path_runs_this_one(self):
+        bindir = self.root / ".bin"
+        bindir.mkdir()
+        other = bindir / "flow"
+        other.write_text("#!/bin/sh\necho another flow\n")
+        other.chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+        self.assertIn(f"`{FLOW} new`", self.edit("lib/app.ex"))
+        other.write_text(f'#!/bin/sh\nexec "{FLOW}" "$@"\n')
+        self.assertIn("`flow new`", self.edit("lib/app.ex"))
 
     def test_ship_to_done_after_commit(self):
         self.to_ship()
