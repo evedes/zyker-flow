@@ -395,6 +395,10 @@ Of the binary and its launcher:
 - Input that is not UTF-8 (arguments, paths, symlink targets, hook stdin, file
   contents) is an error: the CLI exits 1, and pre-tool-use denies in a flow
   repo.
+- The launcher compares mtimes with `test -nt`, which macOS's `/bin/sh` (bash
+  3.2) does to the second: a source, `VERSION` or `SHA256SUMS` changed within
+  the same second as the last build or check is noticed only once something
+  changes again.
 
 ## Tests
 

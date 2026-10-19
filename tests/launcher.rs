@@ -308,6 +308,12 @@ impl Env {
         set_mtime(&self.cached(), SystemTime::now() - Duration::from_secs(60));
     }
 
+    /// Moves the stamp a minute back, so a change made right after the call that wrote it
+    /// is newer. macOS's /bin/sh (bash 3.2) compares mtimes to the second.
+    fn age_stamp(&self) {
+        set_mtime(&self.stamp(), SystemTime::now() - Duration::from_secs(60));
+    }
+
     /// Makes the plugin a checkout: src/ (with an empty directory), templates/,
     /// Cargo.toml and Cargo.lock, all an hour old. Returns the hash of its sources,
     /// computed here independently.
@@ -566,6 +572,7 @@ fn a_new_pin_verifies_the_cache_again() {
     let e = Env::new();
     e.cache_release("cached");
     e.run(&["status"]).assert_ran("cached", "status");
+    e.age_stamp();
     e.publish(&stand_in("downloaded"), None, None);
     e.run(&["status"]).assert_ran("downloaded", "status");
     assert_eq!(e.log(), format!("curl {RELEASE}/{BINARY}\n"));
@@ -863,6 +870,7 @@ fn an_updated_source_checks_the_release_again() {
     let source = e.sources();
     e.publish(&stand_in("downloaded"), None, Some(&source));
     e.run(&["status"]).assert_ran("downloaded", "status");
+    e.age_stamp();
     fs::write(e.path("plugin/templates/spec.md"), "changed\n").unwrap();
     e.fake("cargo", FAKE_CARGO);
     e.run(&["status"]).assert_ran("built", "status");
