@@ -17,8 +17,9 @@ nothing.
 |---|---|
 | Code under `protected_paths` is edited only in **build** (Edit/Write tools, Bash writes, `codegen` commands) | hook |
 | Code is committed only in **ship**, with both approvals valid, gates passed and review passed **on the exact code being committed** (content fingerprint) | hook on `git commit` |
+| Every move into review starts a fresh `review.md`, and gates run only in build, so a verdict only covers the code it was written for | CLI |
 | No `git push` while a CI/deploy run is in flight | hook on `git push` (the `deploy` provider) |
-| Spec and tickets need the user's approval; editing them afterwards voids it (content hash) | CLI |
+| Spec and tickets need the user's approval; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again | CLI |
 | A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
 | The agent can't run `approve`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
 
@@ -27,6 +28,14 @@ from being made. They do count towards the gates, though: the fingerprint
 covers every file git sees outside `work_dir` (tracked, or untracked and not
 ignored), so a README edit or a stray scratch file after `flow gates` makes the
 gates stale, and the commit is refused until they are rerun.
+
+The commit hook judges a lone `git commit` by what is staged, so a docs commit
+mid-feature goes through while code changes sit unstaged. Anything that can
+commit more than the index (`-a`, `-p`, `-i`, `-o`, a pathspec, another
+command in the same call, such as `git add -A && git commit`, or a `$(…)`,
+backtick or `<(…)` substitution, which could run one) is judged by the whole
+working tree instead. That includes the usual `-m "$(cat <<'EOF' …)"` message:
+for a docs commit mid-feature, use a literal `-m`.
 
 What hooks can't enforce is judgment: a thin spec can pass the section checks.
 That's what the two user approvals and the fresh-context review are for. Bash
@@ -57,7 +66,8 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
   fingerprint; `git commit` in ship needs the current tree to match both.
 - **Pre-tool-use hook.** Edit/Write tools: deny state files always, protected
   paths outside build. Bash: the command is split into simple commands (quotes,
-  `&&`/`||`/`;`/`|`, heredocs fed to `cat` dropped as data), then each is
+  `&&`/`||`/`;`/`|`, heredocs fed to `cat` dropped as data unless `cat` pipes
+  them on), then each is
   checked for user-only `flow` subcommands, redirects into code or state
   files, mutating tools (`rm`, `mv`, `cp`, `sed -i`, `git checkout`…) that
   name a protected path, `codegen` patterns, `git commit` and `git push`.
@@ -77,22 +87,23 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
 | Command | Who | What |
 |---|---|---|
 | `flow init` | anyone | opt the repo in: `.flow.json`, `<work_dir>/STANDING.md`, deny rules (refuses if `.flow.json` exists) |
-| `flow new <slug> ["<title>"]` | agent | start a feature `NNN-<slug>` (one active at a time); the title defaults to the slug |
+| `flow new <slug> ["<title>"]` | agent | start a feature `NNN-<slug>` (one active at a time; a leading `NNN-` in the slug is dropped); the title defaults to the slug |
 | `flow status`, `flow check` | anyone | where things are, what blocks the next phase (`check` exits 1 while blocked) |
 | `flow advance`, `flow back` | agent | move forward (when `check` passes) or back one phase |
-| `flow gates` | agent | in build or review: run standing gates + every ticket's verification commands, record result and fingerprint |
+| `flow gates` | agent | in build: run standing gates + every ticket's verification commands, record result and fingerprint (refuses while an approval is stale) |
 | `flow deploy` | anyone | the last 15 CI runs (`*` marks HEAD) and the health check |
 | `flow approve spec\|tickets` | user | approve the current artifact (only in its own phase, and only when it is complete) |
 | `flow pause`, `flow resume` | user | suspend or restore enforcement (state files stay protected) |
-| `flow abandon` | user | drop the active feature (its folder stays, phase `abandoned`) |
+| `flow abandon` | user | drop the active feature (its folder stays, phase `abandoned`; also clears an active feature whose folder is gone) |
 
 The user runs their commands with the `!` prefix in Claude Code (e.g.
 `! flow approve spec`) or from a terminal. `!` commands don't go through the
 hooks. A Claude slash command can't do this: it runs through the agent's
 tools, which the hook blocks by design.
 
-Messages from the CLI and hooks say `flow` when one is on PATH, else its path
-(see [The flow binary](#the-flow-binary)).
+Messages from the CLI and hooks say `flow` when the `flow` on PATH is this
+plugin's `bin/flow` (or a short script that names it, like the wrapper below),
+else its path (see [The flow binary](#the-flow-binary)).
 
 ## `.flow.json`
 
@@ -181,8 +192,11 @@ questions` (research and spec; unticked `- [ ]` items block advancing),
 `#` lines skipped) and `## Verdict` (review; must start with `pass`).
 
 Phase artifacts are scaffolded on entry: `research.md` by `flow new`,
-`spec.md`, `tickets/T01.md` and `review.md` by `flow advance`. Rename
-`T01.md` to `T01-<slug>.md` and copy it for further tickets.
+`spec.md`, `tickets/T01.md` (unless `tickets/` already holds tickets) and
+`review.md` by `flow advance`. Rename `T01.md` to `T01-<slug>.md` and copy it
+for further tickets. Each `flow advance` into review renames an existing
+`review.md` to `review-<n>.md` and scaffolds a fresh one, so coming back to
+review after a code change always needs a new verdict.
 
 ## Files
 
@@ -194,7 +208,9 @@ Per repo:
 - `<work_dir>/templates/` (optional): template overrides.
 - `<work_dir>/flow.json` (active feature, paused flag) and
   `<work_dir>/<NNN-slug>/`: `state.json`, `research.md`, `spec.md`,
-  `tickets/T01-*.md`, `review.md`. Committed with the feature, as its record.
+  `tickets/T01-*.md`, `review.md` (earlier rounds as `review-<n>.md`).
+  Committed with the feature, as its record: ship→done refuses while that
+  folder has uncommitted changes.
   flow rewrites the two state files pretty-printed (non-ASCII as UTF-8),
   keeping keys it doesn't know; a known key of the wrong type, or an unknown
   phase, fails every command and hook.
@@ -317,9 +333,9 @@ not held up on every call. `FLOW_BIN`, `FLOW_CACHE_DIR`, `XDG_CACHE_HOME` and
 resolve inside the guarded repo.
 
 The launcher exports `FLOW_SELF`, its own path with symlinks resolved, to the
-binary it runs. flow uses it where it names itself (`flow` when one is on
-PATH, else this path, relative to the git root when inside it); a binary run
-directly names its own path.
+binary it runs. flow uses it where it names itself (`flow` when the `flow` on
+PATH is this launcher or a short script naming it, else this path, relative to
+the git root when inside it); a binary run directly names its own path.
 
 ### Releasing
 
@@ -351,8 +367,6 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
   checked.
 - Without a `deploy` section, ship→done only checks that the tree is clean,
   not that the reviewed code is what was committed.
-- `flow approve` skips the completeness checks for any file or section whose
-  name contains "approval".
 - Only `git commit` (and `commit-tree`) is gated; `merge`, `cherry-pick`,
   `revert`, `am`, `rebase` and `pull` are not.
 - Bash write detection misses `&>`/`&>>` redirects and `cd dir && …` into a
@@ -360,10 +374,11 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
   shell's cwd, and denies copies *out of* protected paths
   (`cp lib/x /tmp/`).
 - The feature's state is untracked until it is first committed, and the hooks
-  allow `git stash -u` and `git clean`, which remove it; flow then reports no
-  active feature.
+  allow `git stash -u` and `git clean`, which remove it. flow then reports no
+  active feature, or, when a tracked `<work_dir>/flow.json` survives, that the
+  active feature's state is missing, and denies code edits until it is restored
+  or the user runs `flow abandon`.
 - A `## ` line inside a fenced block is read as a section heading.
-- `flow new` accepts a slug that sanitises to nothing (feature `001-`).
 
 Of the binary and its launcher:
 

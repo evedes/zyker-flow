@@ -25,7 +25,7 @@ default; `<work>` below).
 | `flow status` / `flow check` | you | where things are and what blocks the next phase |
 | `flow advance` | you | move on; refuses until `check` passes, scaffolds the next artifact |
 | `flow back` | you | return to the previous phase (e.g. review found a problem) |
-| `flow gates` | you | run standing gates + every ticket's Verification steps, record the result |
+| `flow gates` | you | in build: run standing gates + every ticket's Verification steps, record the result |
 | `flow deploy` | you | CI runs for HEAD and the health check |
 | `flow approve spec\|tickets` | **user only** | sign off; stays valid until the file changes |
 | `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
@@ -66,7 +66,9 @@ with one is missing or empty.
    further ticket. Every field the standing agreement (`<work>/STANDING.md`)
    doesn't cover must be specific; `## Verification steps` holds the runnable
    commands that prove the ticket (one per line, in a ``` block). Ask for
-   `! flow approve tickets`.
+   `! flow approve tickets`. Leave `spec.md` and the tickets alone once
+   approved: `flow gates` and every later phase refuse until they are restored
+   or approved again (`flow back` to that phase).
 4. **build** — per ticket, write the failing test from its acceptance criteria
    first, then the code, then check it in the running app. When all tickets
    are done, `flow gates` must pass. Any later change to a file git sees
@@ -76,12 +78,20 @@ with one is missing or empty.
 5. **review** — dispatch a fresh subagent that did not write the code. Give it
    `spec.md`, the tickets and `git diff`, and have it write `review.md`
    (Verdict `pass`/`fail`, findings with file:line). On `fail`: `flow back`,
-   fix, `flow gates`, `flow advance`, review again.
-6. **ship** — commit code and the `<work>` folder together. With a `deploy`
+   fix, `flow gates`, `flow advance`, review again. Every move into review
+   keeps the previous `review.md` as `review-<n>.md` and starts a fresh one,
+   so each round needs a new review. Change nothing during review, docs
+   included: gates run only in build, so any change means going back there.
+6. **ship** — commit code and the `<work>` folder together (done refuses
+   while the feature's folder has uncommitted changes). With a `deploy`
    section in `.flow.json`, push too: the push hook refuses while a CI/deploy
    run is in flight. Watch with `flow deploy`; `flow advance` to **done** once
    CI is green for HEAD and the health check returns 200. Without one, ship
    ends once everything is committed. Moving to done rewrites `state.json`, so
    commit the `<work>` folder once more afterwards.
 
-Work that touches no protected path (docs, CI, tooling) needs no feature.
+Work that touches no protected path (docs, CI, tooling) needs no feature. To
+commit it mid-feature, stage it and run a plain `git commit -m '<message>'`
+on its own, with a literal message: that is judged by what is staged, while
+`-a`, a pathspec, a `git add` in the same call or a `$(…)` message (a heredoc
+one included) counts the whole working tree, unstaged code included.
