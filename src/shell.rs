@@ -122,6 +122,21 @@ pub fn bash_commands(cmd: &str) -> Vec<String> {
     out
 }
 
+/// A word that is an absolute path, or one under `~`.
+static ABSOLUTE: LazyLock<Regex> = regex!(r#"(?:^|[\s\x1c-\x1f'"=])(~?/[^\s\x1c-\x1f'";&|()<>]*)"#);
+
+/// The absolute paths a simple command names, `~` expanded from $HOME (when absolute).
+pub fn absolute_words(cmd: &str) -> Vec<String> {
+    let home = std::env::var("HOME").ok().filter(|h| h.starts_with('/'));
+    let words = ABSOLUTE.captures_iter(cmd).map(|m| m[1].to_string());
+    let expand = |w: String| match (w.strip_prefix('~'), &home) {
+        (Some(rest), Some(home)) => Some(format!("{}{rest}", home.trim_end_matches('/'))),
+        (Some(_), None) => None,
+        (None, _) => Some(w),
+    };
+    words.filter_map(expand).collect()
+}
+
 /// `git commit` options that take a value, and those that commit more than the index.
 const COMMIT_VALUE_OPTS: [&str; 16] = [
     "-m",

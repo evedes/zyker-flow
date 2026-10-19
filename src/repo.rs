@@ -55,11 +55,6 @@ pub fn find_root(start: &Path) -> Result<Option<PathBuf>> {
     Ok(git_root(start)?.filter(|root| root.join(".flow.json").is_file()))
 }
 
-/// An absolute path as text, `/`-separated.
-fn posix_abs(path: &Path) -> String {
-    path.to_string_lossy().trim_end_matches('/').to_string()
-}
-
 /// `s` in quotes, as flow's messages quote a pattern: single quotes, or double ones when
 /// `s` has a single quote and no double one; backslashes and that quote escaped.
 fn quote(s: &str) -> String {
@@ -179,20 +174,12 @@ impl Repo {
     }
 
     /// A regex for a Bash word naming one of `alts` (repo-relative paths, as regex): as
-    /// written, or after `./`, `$PWD/` or the root's absolute path, and ending there or at
-    /// a `/`. So `/tmp/lib/x` doesn't name `lib/`, nor `src-old` `src`.
+    /// written, or after `./` or `$PWD/`, and ending there or at a `/`. So `/tmp/lib/x`
+    /// doesn't name `lib/`, nor `src-old` `src`. Absolute words are resolved instead (see
+    /// [`crate::shell::absolute_words`]).
     pub fn names(&self, alts: &str) -> Result<regex::Regex> {
-        let mut roots = BTreeSet::from([posix_abs(&self.root), posix_abs(&self.real_root)]);
-        let home = std::env::var("HOME").ok().filter(|h| h.starts_with('/'));
-        if let Some(home) = home.map(|h| h.trim_end_matches('/').to_string()) {
-            let tilde = roots.iter().filter_map(|r| r.strip_prefix(&home)).map(|r| format!("~{r}"));
-            let tilde: Vec<String> = tilde.filter(|r| r.starts_with("~/")).collect();
-            roots.extend(tilde);
-        }
-        let mut prefixes = vec![r"\./".to_string(), r"\$PWD/".into(), r"\$\{PWD\}/".into()];
-        prefixes.push(r"\$\(pwd\)/".into());
-        prefixes.extend(roots.iter().map(|r| regex::escape(&format!("{r}/"))));
-        let (space, prefix) = (r"\s\x1c-\x1f", prefixes.join("|"));
+        let prefix = r"\./|\$PWD/|\$\{PWD\}/|\$\(pwd\)/";
+        let space = r"\s\x1c-\x1f";
         let re = format!(r#"(?:^|[{space}'"=])(?:{prefix})*(?:{alts})(?:[/*?{space}'";&|()<>]|$)"#);
         Ok(regex::Regex::new(&re)?)
     }

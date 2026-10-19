@@ -486,14 +486,25 @@ fn commit_of_staged_docs_is_allowed_mid_feature() {
 
 #[test]
 fn paths_name_code_only_inside_the_repo() {
-    let t = Flow::new();
+    let mut t = Flow::new();
     t.flow(&["new", "hello"]);
     let root = t.root.display().to_string();
+    // The root through a symlink (macOS's /var is one), and under ~.
+    let links = TempDir::new();
+    symlink(&t.root, links.path().join("repo")).unwrap();
+    let linked = links.path().join("repo").display().to_string();
+    t.set_env("HOME", links.path());
     let code = "phase explore";
-    for c in [format!("rm {root}/lib/app.ex"), "rm -rf ./lib".into(), "rm \"$(pwd)/lib/x\"".into()]
-    {
+    for c in [
+        format!("rm {root}/lib/app.ex"),
+        format!("rm '{linked}/lib/app.ex'"),
+        "rm ~/repo/lib/app.ex".into(),
+        "rm -rf ./lib".into(),
+        "rm \"$(pwd)/lib/x\"".into(),
+    ] {
         assert_in(code, &denied(t.bash(&c)));
     }
+    assert_in("state files", &denied(t.bash(&format!("rm {linked}/work/flow.json"))));
     assert_in("state files", &denied(t.bash(&format!("rm {root}/work/flow.json"))));
     for c in ["cp README.md /tmp/lib/README.md", "rm /x/mix.exs", "rm mix.exs.bak"] {
         assert_eq!(t.bash(c), None, "{c}");

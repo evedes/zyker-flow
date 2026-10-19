@@ -70,7 +70,9 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
   them on), then each is
   checked for user-only `flow` subcommands, redirects into code or state
   files, mutating tools (`rm`, `mv`, `cp`, `sed -i`, `git checkout`…) that
-  name a protected path, `codegen` patterns, `git commit` and `git push`.
+  name a protected path (as written, after `./` or `$PWD/`, or as an absolute
+  or `~/` path that resolves into it), `codegen` patterns, `git commit` and
+  `git push`.
 - **Fail closed.** If the pre-tool-use hook fails (an error, a panic, a
   payload of the wrong shape, no binary to run), it denies the call with
   `hook error: …` instead of allowing it. Claude Code always sends a JSON

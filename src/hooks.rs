@@ -7,8 +7,8 @@ use crate::error::{bail, Error, Result};
 use crate::paths::flow_cmd;
 use crate::repo::{find_root, Repo};
 use crate::shell::{
-    bash_commands, commits_index_only, redirect_targets, without_discards, GIT_COMMIT, GIT_PUSH,
-    MUTATES, USER_ONLY, USER_ONLY_CMD,
+    absolute_words, bash_commands, commits_index_only, redirect_targets, without_discards,
+    GIT_COMMIT, GIT_PUSH, MUTATES, USER_ONLY, USER_ONLY_CMD,
 };
 use serde_json::{json, Value};
 use std::io;
@@ -204,8 +204,11 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
         writes_state |= targets.iter().any(|t| repo.is_state_file(t));
         writes_code |= targets.iter().any(|t| repo.is_protected(t));
         if MUTATES.is_match(&c) {
-            writes_state |= names_state.is_match(&c);
-            writes_code |= names_code.as_ref().is_some_and(|re| re.is_match(&c));
+            // An absolute path names what it resolves to, symlinks and all.
+            let abs: Vec<String> = absolute_words(&c).iter().filter_map(|w| repo.rel(w)).collect();
+            writes_state |= names_state.is_match(&c) || abs.iter().any(|r| repo.is_state_file(r));
+            let code = names_code.as_ref().is_some_and(|re| re.is_match(&c));
+            writes_code |= code || abs.iter().any(|r| repo.is_protected(r));
         }
         codegen = codegen || any_match(&repo.codegen, &c)?;
     }
