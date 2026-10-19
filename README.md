@@ -239,9 +239,9 @@ In the plugin:
 
 ## Installing
 
-Requirements: git and a POSIX sh; `gh` for the `github` provider. No Python,
-and on Linux or macOS (x86_64 or aarch64) no Rust: bin/flow downloads the
-release binary on first use (with `curl` or `wget`, checked with `sha256sum` or
+Requirements: git and a POSIX sh; `gh` for the `github` provider. On Linux
+or macOS (x86_64 or aarch64) no Rust is needed: bin/flow downloads the release
+binary on first use (with `curl` or `wget`, checked with `sha256sum` or
 `shasum`). On other Unix systems, and for a checkout whose sources have no
 release, it builds flow with cargo (Rust 1.85 or newer). Windows is not
 supported. See [The flow binary](#the-flow-binary).
