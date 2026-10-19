@@ -34,6 +34,18 @@ Never run the user-only commands, and never edit `<work>/flow.json` or
 `<work>/*/state.json`: the hooks deny both. When you need an approval, say so
 and ask the user to run `! flow approve <kind>`.
 
+`.flow.json`, `<work>/templates/` and `<work>/STANDING.md` set the rules. The
+hooks don't stop you editing them, but never do it to get past a check during
+a feature; propose the change and let the user make it. If a hook denies with
+`hook error: …`, don't work around it: tell the user (usually `.flow.json` is
+invalid and needs fixing by hand). A `hook error:` about the payload (a lone
+surrogate, `expected value at line …`) means flow could not read the tool
+call itself: retry it without the unusual characters, and tell the user if
+that does not help. `hook error: no flow binary: …` means the
+plugin's launcher found no flow binary to run (offline with no cached release,
+no cargo to build one): tell the user what it says; every call stays denied
+until it is fixed, and a download is retried after five minutes.
+
 ## Phases
 
 All artifacts live in `<work>/<NNN-slug>/` and are committed with the feature.
@@ -49,14 +61,18 @@ with one is missing or empty.
 2. **spec** — fill `spec.md`: the user-visible behaviour, data model, UI and
    testable acceptance criteria, plus what is out of scope. Present it and ask
    for `! flow approve spec`. Changing `spec.md` afterwards voids the approval.
-3. **tickets** — split the spec into `tickets/T01-<slug>.md`, `T02-…` from
-   the template. Every field the standing agreement (`<work>/STANDING.md`)
+3. **tickets** — split the spec into `tickets/T01-<slug>.md`, `T02-…`:
+   `flow advance` scaffolds `tickets/T01.md`; rename it and copy it for each
+   further ticket. Every field the standing agreement (`<work>/STANDING.md`)
    doesn't cover must be specific; `## Verification steps` holds the runnable
    commands that prove the ticket (one per line, in a ``` block). Ask for
    `! flow approve tickets`.
 4. **build** — per ticket, write the failing test from its acceptance criteria
    first, then the code, then check it in the running app. When all tickets
-   are done, `flow gates` must pass. Any later code change makes the gates stale.
+   are done, `flow gates` must pass. Any later change to a file git sees
+   outside `<work>` makes the gates stale, docs and untracked scratch files
+   included: finish those before `flow gates`, and keep scratch output out of
+   the repo (or gitignored) from then on.
 5. **review** — dispatch a fresh subagent that did not write the code. Give it
    `spec.md`, the tickets and `git diff`, and have it write `review.md`
    (Verdict `pass`/`fail`, findings with file:line). On `fail`: `flow back`,
@@ -65,6 +81,7 @@ with one is missing or empty.
    section in `.flow.json`, push too: the push hook refuses while a CI/deploy
    run is in flight. Watch with `flow deploy`; `flow advance` to **done** once
    CI is green for HEAD and the health check returns 200. Without one, ship
-   ends once everything is committed.
+   ends once everything is committed. Moving to done rewrites `state.json`, so
+   commit the `<work>` folder once more afterwards.
 
 Work that touches no protected path (docs, CI, tooling) needs no feature.

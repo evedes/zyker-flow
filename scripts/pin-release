@@ -1,0 +1,25 @@
+#!/bin/sh
+# Pin the published v<VERSION> release: copy its SHA256SUMS next to VERSION, after
+# checking that it lists all four binaries and this checkout's sources. bin/flow runs
+# only a release binary this file pins, so commit it, with the VERSION bump, to main.
+#
+# Usage: scripts/pin-release
+set -eu
+cd "$(dirname "$0")/.."
+ver=$(cat VERSION)
+url=https://github.com/evedes/zyker-flow/releases/download/v$ver/SHA256SUMS
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+curl -fsSL -o "$tmp" "$url"
+for name in flow-x86_64-unknown-linux-musl flow-aarch64-unknown-linux-musl \
+	flow-x86_64-apple-darwin flow-aarch64-apple-darwin source; do
+	grep -q "  $name\$" "$tmp" || { echo "pin-release: $url lists no $name" >&2 && exit 1; }
+done
+want=$(scripts/source-hash)
+grep -q "^$want  source\$" "$tmp" || {
+	echo "pin-release: v$ver was released from other sources than this checkout" >&2
+	exit 1
+}
+cp "$tmp" SHA256SUMS
+echo "pinned v$ver:"
+cat SHA256SUMS

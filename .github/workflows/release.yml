@@ -1,0 +1,124 @@
+# On a v<VERSION> tag: build flow for the four release targets and publish them, raw,
+# with SHA256SUMS (the four binaries and the `source` hash of the tagged tree), as the
+# GitHub release bin/flow downloads from. The release stays a draft (not downloadable)
+# until every binary and SHA256SUMS are attached, and a published release is never
+# changed. bin/flow trusts only the SHA256SUMS committed next to VERSION:
+# scripts/pin-release copies this one there (see README, "Releasing").
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+  CARGO_ZIGBUILD_VERSION: "0.22.3"
+  ZIG_VERSION: "0.15.2"
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Tag matches VERSION and Cargo.toml
+        run: |
+          want="v$(cat VERSION)"
+          if [ "$TAG" != "$want" ]; then
+            echo "::error::tag $TAG does not match VERSION ($want)"
+            exit 1
+          fi
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$cargo_version" != "$want" ]; then
+            echo "::error::Cargo.toml version $cargo_version does not match VERSION ($want)"
+            exit 1
+          fi
+      - name: Draft release
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft >draft 2>/dev/null; then
+            if [ "$(cat draft)" != true ]; then
+              echo "::error::$TAG is already published; release a new version instead"
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --draft --verify-tag --title "flow $TAG" --generate-notes
+          fi
+
+  linux:
+    needs: draft
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      # Checks the tarball's minisign signature against the Zig Software Foundation's key.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+      - name: Toolchain and cargo-zigbuild
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+          zig version
+          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+      - name: Build (static musl)
+        run: |
+          cargo zigbuild --release --locked --target ${{ matrix.target }}
+          bin=target/${{ matrix.target }}/release/flow
+          file "$bin"
+          file "$bin" | grep -q 'statically linked'
+          if [ ${{ matrix.target }} = x86_64-unknown-linux-musl ]; then "$bin" >/dev/null; fi
+          mkdir dist && cp "$bin" dist/flow-${{ matrix.target }}
+      - name: Upload
+        run: gh release upload "$TAG" dist/flow-${{ matrix.target }} --clobber
+
+  macos:
+    needs: draft
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          bin=target/${{ matrix.target }}/release/flow
+          # An ad-hoc signature, valid after stripping: arm64 macOS runs nothing unsigned.
+          codesign --force --sign - "$bin"
+          file "$bin"
+          if [ "$(uname -m)" = arm64 ] && [ ${{ matrix.target }} = aarch64-apple-darwin ]; then "$bin" >/dev/null; fi
+          mkdir dist && cp "$bin" dist/flow-${{ matrix.target }}
+      - name: Upload
+        run: gh release upload "$TAG" dist/flow-${{ matrix.target }} --clobber
+
+  publish:
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: SHA256SUMS of the uploaded binaries and the sources
+        run: |
+          source=$(scripts/source-hash)
+          mkdir dist && cd dist
+          gh release download "$TAG" --pattern 'flow-*'
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
+            [ -f "flow-$t" ] || { echo "::error::flow-$t missing from the release"; exit 1; }
+          done
+          sha256sum flow-* >SHA256SUMS
+          echo "$source  source" >>SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --clobber
+      - name: Publish
+        run: gh release edit "$TAG" --draft=false --latest

@@ -1,0 +1,31 @@
+[package]
+name = "flow"
+version = "0.1.0"
+edition = "2021"
+# ureq 3 needs 1.85; Cargo.lock is format 4 (cargo 1.78+).
+rust-version = "1.85"
+description = "A phase-gated feature workflow for Claude Code, enforced by hooks"
+publish = false
+
+[[bin]]
+name = "flow"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order: unknown keys keep their place when flow rewrites a JSON file.
+serde_json = { version = "1", features = ["preserve_order"] }
+# Codegen patterns from .flow.json use lookaheads; the hook's own patterns use a
+# lookbehind and a backreference.
+fancy-regex = "0.18"
+regex = "1"
+sha2 = "0.10"
+# platform-verifier: HTTPS checks certificates against the system's roots.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# A panic in the hook is caught and reported as a deny (fail closed).
+panic = "unwind"

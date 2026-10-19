@@ -1,877 +1,352 @@
-#!/usr/bin/env python3
-"""flow — a phase-gated feature workflow for Claude Code.
-
-explore -> spec -> tickets -> build -> review -> ship -> done
-
-State lives in <work_dir>/flow.json (active feature, paused flag) and
-<work_dir>/<NNN-slug>/state.json (phase, approvals, gate and review results).
-Only this CLI writes them; the PreToolUse hook (`flow hook pre-tool-use`)
-stops the agent from editing them, from running the user-only commands, and
-from editing code, committing or pushing out of phase.
-
-Repos opt in with a `.flow.json` at the git root (`flow init` writes one);
-everywhere else the hooks do nothing.
-"""
-
-import hashlib
-import json
-import os
-import re
-import subprocess
-import sys
-import urllib.error
-import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
-
-PHASES = ["explore", "spec", "tickets", "build", "review", "ship", "done"]
-USER_ONLY = ("approve", "pause", "resume", "abandon")
-APPROVABLE = ("spec", "tickets")
-PLACEHOLDER = "TODO(flow)"
-TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
-# CI run statuses, across providers: anything not in flight or passed is a failure.
-IN_FLIGHT = {"running", "waiting", "blocked", "queued", "pending", "requested", "in_progress"}
-PASSED = {"success", "skipped"}
-PROVIDERS = ("forgejo", "github", "command")
-
-EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-
-# A Bash command writes the file it redirects into, or the paths it names when it runs a
-# mutating tool. Both are judged per simple command (see bash_commands).
-REDIRECT = re.compile(r"(?<![<&>])\d?>{1,2}\s*['\"]?([^\s'\";&|()<>]+)")
-WRITE_HINT = re.compile(
-    r"\btee\b|\bsed\s+(-\S*\s+)*-i|\bperl\s+(-\S*\s+)*-i|\brm\b|\bmv\b|\bcp\b|"
-    r"\btouch\b|\btruncate\b|\bpatch\b|\bln\b|"
-    r"\bgit\s+(checkout|restore|apply|stash|reset|mv|rm)\b"
-)
-HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)(\w+)\2")
-
-
-def split_commands(text):
-    """Split shell text on unquoted &&, ||, ;, |, & and newlines."""
-    parts, cur, quote, i = [], [], None, 0
-    while i < len(text):
-        c = text[i]
-        if quote:
-            cur.append(c)
-            if c == "\\" and quote == '"' and i + 1 < len(text):
-                cur.append(text[i + 1])
-                i += 1
-            elif c == quote:
-                quote = None
-        elif c in "'\"":
-            quote = c
-            cur.append(c)
-        elif c == "\\" and i + 1 < len(text):
-            cur.append(text[i : i + 2])
-            i += 1
-        elif c in ";|&\n" and not (c == "&" and (text[i - 1 : i] in "<>" or text[i + 1 : i + 2] == ">")):
-            parts.append("".join(cur))
-            cur = []
-        else:
-            cur.append(c)
-        i += 1
-    parts.append("".join(cur))
-    return [p.strip() for p in parts if p.strip()]
-
-
-def bash_commands(cmd):
-    """The simple commands in a Bash tool call. A heredoc fed to `cat` is data (its text
-    lands in the redirect target), so its body is dropped; any other heredoc body (a
-    script for python, sh, psql...) is kept as part of the command that reads it."""
-    lines, out, i = cmd.split("\n"), [], 0
-    while i < len(lines):
-        line, bodies = lines[i], []
-        i += 1
-        for m in HEREDOC.finditer(line):
-            body = []
-            while i < len(lines):
-                end = lines[i].lstrip("\t") if m.group(1) else lines[i]
-                i += 1
-                if end == m.group(3):
-                    break
-                body.append(lines[i - 1])
-            reader = split_commands(line[: m.start()])
-            if not (reader and re.match(r"(\w+=\S*\s+)*cat\b", reader[-1])):
-                bodies.append(" ".join(body))
-        cmds = split_commands(line)
-        if bodies and cmds:
-            cmds[-1] += " " + " ".join(bodies)
-        out.extend(cmds)
-    return out
-GIT_COMMIT = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*commit\b")
-GIT_PUSH = re.compile(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*push\b")
-def flow_cmd(root):
-    """How the user invokes this CLI: bare `flow` when one is on PATH (this file, or the
-    ~/.local/bin wrapper that runs it), else its repo path."""
-    import shutil
-    me = Path(__file__).resolve()
-    if shutil.which("flow"):
-        return "flow"
-    try:
-        return me.relative_to(Path(root).resolve()).as_posix()
-    except ValueError:
-        return str(me)
-
-
-USER_ONLY_CMD = re.compile(r"(^|[\s'\"(=])(\S*/)?flow\s+(" + "|".join(USER_ONLY) + r")\b")
-
-
-class FlowError(Exception):
-    pass
-
-
-def now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def sha(data):
-    return hashlib.sha256(data).hexdigest()[:16]
-
-
-def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.replace(path)
-
-
-def run_git(root, *args):
-    r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise FlowError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
-    return r.stdout
-
-
-def git_root(start):
-    r = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], cwd=start, capture_output=True, text=True
-    )
-    return Path(r.stdout.strip()) if r.returncode == 0 else None
-
-
-def find_root(start):
-    root = git_root(start)
-    return root if root and (root / ".flow.json").is_file() else None
-
-
-def run_json(cmd, cwd, what):
-    """Run a command (a list, or a string for the shell) and parse its stdout as JSON."""
-    try:
-        r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), capture_output=True,
-                           text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise FlowError(f"{what} failed: {e}")
-    if r.returncode != 0:
-        raise FlowError(f"{what} failed (exit {r.returncode}): {r.stderr.strip()[:200]}")
-    try:
-        return json.loads(r.stdout)
-    except json.JSONDecodeError:
-        raise FlowError(f"{what} did not print JSON")
-
-
-# --- markdown checks ---------------------------------------------------------
-
-
-def sections(text):
-    out, cur = {}, None
-    for line in text.splitlines():
-        m = re.match(r"^##\s+(.+?)\s*$", line)
-        if m:
-            cur = m.group(1).strip().lower()
-            out[cur] = []
-        elif cur is not None:
-            out[cur].append(line)
-    return {k: "\n".join(v).strip() for k, v in out.items()}
-
-
-def check_doc(path, required, label=None):
-    label = label or path.name
-    if not path.is_file():
-        return [f"{label}: missing"]
-    text = path.read_text()
-    secs = sections(text)
-    problems = [f"{label}: section '## {s}' is missing or empty" for s in required if not secs.get(s)]
-    if PLACEHOLDER in text:
-        problems.append(f"{label}: still contains {PLACEHOLDER} placeholders")
-    return problems
-
-
-def unchecked_boxes(path, section):
-    if not path.is_file():
-        return []
-    body = sections(path.read_text()).get(section, "")
-    n = len(re.findall(r"^\s*[-*]\s+\[ \]", body, re.M))
-    return [f"{path.name}: {n} unanswered item(s) in '## {section}'"] if n else []
-
-
-def gate_commands(ticket_path):
-    """Commands in the fenced code block(s) of a ticket's Verification steps."""
-    body = sections(ticket_path.read_text()).get("verification steps", "")
-    cmds, inside = [], False
-    for line in body.splitlines():
-        if line.strip().startswith("```"):
-            inside = not inside
-            continue
-        if inside and line.strip() and not line.strip().startswith("#"):
-            cmds.append(line.strip())
-    return cmds
-
-
-# --- repository and state -------------------------------------------------------
-
-
-class Repo:
-    def __init__(self, root):
-        self.root = Path(root)
-        self.config = json.loads((self.root / ".flow.json").read_text())
-        self.work = self.root / self.config.get("work_dir", "work")
-        self.work_rel = self.work.relative_to(self.root).as_posix()
-        self.protected = [p.rstrip("/") for p in self.config.get("protected_paths", [])]
-        # Commands that write code without naming the files (generators, formatters).
-        self.codegen = []
-        for p in self.config.get("codegen", []):
-            try:
-                self.codegen.append(re.compile(p))
-            except re.error as e:
-                raise FlowError(f".flow.json codegen pattern {p!r}: {e}")
-
-    # templates: the repo's own in <work_dir>/templates/, else the plugin's
-    def template(self, name):
-        own = self.work / "templates" / name
-        return (own if own.is_file() else TEMPLATES / name).read_text()
-
-    def required_sections(self, name):
-        """The sections a template seeds with a placeholder must be filled in."""
-        return [s for s, body in sections(self.template(name)).items() if PLACEHOLDER in body]
-
-    # global + feature state
-    def load_global(self):
-        p = self.work / "flow.json"
-        return json.loads(p.read_text()) if p.is_file() else {"active": None, "paused": False}
-
-    def save_global(self, g):
-        write_json(self.work / "flow.json", g)
-
-    def fdir(self, fid):
-        return self.work / fid
-
-    def load_state(self, fid):
-        return json.loads((self.fdir(fid) / "state.json").read_text())
-
-    def save_state(self, fid, st):
-        write_json(self.fdir(fid) / "state.json", st)
-
-    def active(self):
-        fid = self.load_global().get("active")
-        return (fid, self.load_state(fid)) if fid else (None, None)
-
-    def require_active(self):
-        fid, st = self.active()
-        if not fid:
-            raise FlowError(f"no active feature; start one with `{flow_cmd(self.root)} new <slug> \"<title>\"`")
-        return fid, st
-
-    # paths
-    def rel(self, path):
-        p = Path(path)
-        if not p.is_absolute():
-            p = self.root / p
-        try:
-            return os.path.normpath(p.resolve().relative_to(self.root.resolve()).as_posix())
-        except ValueError:
-            return None
-
-    def is_protected(self, rel):
-        return rel is not None and any(rel == p or rel.startswith(p + "/") for p in self.protected)
-
-    def is_state_file(self, rel):
-        if rel is None:
-            return False
-        return rel == f"{self.work_rel}/flow.json" or bool(
-            re.fullmatch(re.escape(self.work_rel) + r"/[^/]+/state\.json", rel)
-        )
-
-    # content fingerprint of everything git would see, minus the work dir
-    def fingerprint(self):
-        files = run_git(self.root, "ls-files", "-co", "--exclude-standard", "-z").split("\0")
-        h = hashlib.sha256()
-        for f in sorted(set(filter(None, files))):
-            if f == self.work_rel or f.startswith(self.work_rel + "/"):
-                continue
-            p = self.root / f
-            h.update(f.encode() + b"\0")
-            if p.is_symlink():
-                h.update(os.readlink(p).encode())
-            elif p.is_file():
-                h.update(p.read_bytes())
-            else:
-                h.update(b"<deleted>")
-            h.update(b"\0")
-        return h.hexdigest()[:16]
-
-    def changed_paths(self):
-        out = run_git(self.root, "status", "--porcelain", "-z", "--untracked-files=all")
-        paths, entries = [], out.split("\0")
-        i = 0
-        while i < len(entries):
-            e = entries[i]
-            if len(e) > 3:
-                paths.append(e[3:])
-                if e[0] in "RC":  # rename/copy: next entry is the source path
-                    i += 1
-                    if i < len(entries) and entries[i]:
-                        paths.append(entries[i])
-            i += 1
-        return paths
-
-    # artifacts
-    def tickets(self, fid):
-        return sorted((self.fdir(fid) / "tickets").glob("*.md"))
-
-    def artifact_hash(self, fid, kind):
-        if kind == "spec":
-            p = self.fdir(fid) / "spec.md"
-            return sha(p.read_bytes()) if p.is_file() else None
-        files = self.tickets(fid)
-        if not files:
-            return None
-        return sha(b"".join(f.name.encode() + b"\0" + f.read_bytes() for f in files))
-
-    def approval_valid(self, fid, st, kind):
-        a = st.get("approvals", {}).get(kind)
-        return bool(a) and a.get("hash") == self.artifact_hash(fid, kind)
-
-    def gates_current(self, st):
-        g = st.get("gates")
-        return bool(g) and g.get("passed") and g.get("fingerprint") == self.fingerprint()
-
-    # deploy: CI runs from the configured provider, as {id, name, status, head_sha}
-    def deploy_cfg(self):
-        return self.config.get("deploy")
-
-    def runs(self, limit=30):
-        cfg = self.deploy_cfg()
-        provider = cfg.get("provider") or ("forgejo" if "forgejo_url" in cfg else None)
-        if provider == "forgejo":
-            runs = self.forgejo(cfg, f"/actions/tasks?limit={limit}").get("workflow_runs", [])
-        elif provider == "github":
-            cmd = ["gh", "run", "list", "--limit", str(limit),
-                   "--json", "databaseId,name,status,conclusion,headSha"]
-            if cfg.get("repo"):
-                cmd += ["--repo", cfg["repo"]]
-            runs = [{"id": r["databaseId"], "name": r["name"], "head_sha": r["headSha"],
-                     "status": r["conclusion"] if r["status"] == "completed" else r["status"]}
-                    for r in run_json(cmd, self.root, "gh run list")]
-        elif provider == "command":
-            if not cfg.get("status_command"):
-                raise FlowError("deploy.provider command needs a deploy.status_command")
-            runs = run_json(cfg["status_command"], self.root, "deploy.status_command")
-        else:
-            raise FlowError(f"deploy.provider must be one of {', '.join(PROVIDERS)}")
-        try:
-            return [{"id": r.get("id", ""), "name": r["name"], "status": r["status"],
-                     "head_sha": r["head_sha"]} for r in runs]
-        except (KeyError, TypeError, AttributeError):
-            raise FlowError(f"{provider}: expected a list of {{name, status, head_sha}}")
-
-    def forgejo(self, cfg, path):
-        token_env = cfg.get("token_env", "FORGEJO_TOKEN")
-        token = os.environ.get(token_env, "")
-        if not token:
-            raise FlowError(f"${token_env} is not set; cannot read Forgejo")
-        req = urllib.request.Request(
-            f"{cfg['forgejo_url'].rstrip('/')}/api/v1/repos/{cfg['repo']}{path}",
-            headers={"Authorization": f"token {token}"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                return json.load(r)
-        except OSError as e:
-            raise FlowError(f"cannot read Forgejo: {e}")
-
-    def health(self):
-        url = self.deploy_cfg().get("health_url")
-        if not url:
-            return None
-        try:
-            # Cloudflare answers 403 to Python's default User-Agent.
-            req = urllib.request.Request(url, headers={"User-Agent": "flow-health/1"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            return e.code
-        except Exception:
-            return 0
-
-
-# --- phase checks --------------------------------------------------------------
-
-
-def check(repo, fid, st):
-    d, phase, problems = repo.fdir(fid), st["phase"], []
-    if phase == "explore":
-        problems += check_doc(d / "research.md", repo.required_sections("research.md"))
-        problems += unchecked_boxes(d / "research.md", "open questions")
-    elif phase == "spec":
-        problems += check_doc(d / "spec.md", repo.required_sections("spec.md"))
-        problems += unchecked_boxes(d / "spec.md", "open questions")
-        if not problems and not repo.approval_valid(fid, st, "spec"):
-            problems.append(f"spec.md needs the user's approval: `! {flow_cmd(repo.root)} approve spec`")
-    elif phase == "tickets":
-        files = repo.tickets(fid)
-        if not files:
-            problems.append("tickets/: no tickets yet")
-        required = repo.required_sections("ticket.md")
-        for t in files:
-            label = f"tickets/{t.name}"
-            problems += check_doc(t, required, label)
-            if t.is_file() and not gate_commands(t):
-                problems.append(f"{label}: '## Verification steps' has no commands in a ``` block")
-        if not problems and not repo.approval_valid(fid, st, "tickets"):
-            problems.append(f"tickets need the user's approval: `! {flow_cmd(repo.root)} approve tickets`")
-    elif phase == "build":
-        if not repo.gates_current(st):
-            problems.append("gates have not passed on the current code: run `flow gates`")
-    elif phase == "review":
-        problems += check_doc(d / "review.md", repo.required_sections("review.md"))
-        verdict = sections((d / "review.md").read_text()).get("verdict", "") if (d / "review.md").is_file() else ""
-        if not re.match(r"^\W*pass\b", verdict, re.I):
-            problems.append("review.md: '## Verdict' does not start with 'pass'")
-        if not repo.gates_current(st):
-            problems.append("code changed since the gates passed: `flow back`, fix, `flow gates`")
-    elif phase == "ship":
-        problems += ship_problems(repo)
-    return problems
-
-
-def ship_problems(repo):
-    problems = []
-    dirty = [p for p in repo.changed_paths() if not p.startswith(repo.work_rel + "/")]
-    if dirty:
-        problems.append(f"uncommitted changes: {', '.join(dirty[:5])}")
-    cfg = repo.deploy_cfg()
-    if not cfg:
-        return problems
-    branch = cfg.get("branch", "main")
-    subprocess.run(["git", "fetch", "-q", "origin", branch], cwd=repo.root, capture_output=True)
-    head = run_git(repo.root, "rev-parse", "HEAD").strip()
-    pushed = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", head, f"origin/{branch}"], cwd=repo.root
-    ).returncode == 0
-    if not pushed:
-        problems.append(f"HEAD is not on origin/{branch} yet: push it")
-        return problems
-    try:
-        mine = [t for t in repo.runs() if t["head_sha"] == head]
-    except FlowError as e:
-        return problems + [str(e)]
-    if not mine:
-        problems.append(f"no CI jobs for {head[:7]} yet")
-    elif any(t["status"] in IN_FLIGHT for t in mine):
-        problems.append("deploy still running: " + ", ".join(f"{t['name']}={t['status']}" for t in mine))
-    elif any(t["status"] not in PASSED for t in mine):
-        problems.append("CI failed: " + ", ".join(f"{t['name']}={t['status']}" for t in mine))
-    status = repo.health()
-    if status is not None and status != 200:
-        problems.append(f"health check returned {status}")
-    return problems
-
-
-# --- commands ------------------------------------------------------------------
-
-
-def scaffold(repo, fid, st, name, dest=None):
-    dest = dest or repo.fdir(fid) / name
-    if dest.exists():
-        return
-    text = repo.template(name)
-    text = text.replace("{title}", st["title"]).replace("{id}", fid).replace("{work_dir}", repo.work_rel)
-    if "{fingerprint}" in text:
-        text = text.replace("{fingerprint}", (st.get("gates") or {}).get("fingerprint", "?"))
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text)
-
-
-def cmd_new(repo, args):
-    if len(args) < 1:
-        raise FlowError('usage: flow new <slug> ["<title>"]')
-    slug = re.sub(r"[^a-z0-9-]+", "-", args[0].lower()).strip("-")
-    title = args[1] if len(args) > 1 else slug.replace("-", " ").capitalize()
-    g = repo.load_global()
-    if g.get("active"):
-        raise FlowError(f"feature {g['active']} is still active; finish it or `! {flow_cmd(repo.root)} abandon`")
-    nums = [int(m.group(1)) for d in repo.work.glob("*") if (m := re.match(r"(\d{3})-", d.name))]
-    fid = f"{max(nums, default=0) + 1:03d}-{slug}"
-    st = {"id": fid, "title": title, "phase": "explore", "approvals": {}, "gates": None,
-          "history": [{"phase": "explore", "at": now()}]}
-    repo.save_state(fid, st)
-    scaffold(repo, fid, st, "research.md")
-    g["active"] = fid
-    repo.save_global(g)
-    print(f"started {fid} in phase explore; fill in {repo.work_rel}/{fid}/research.md")
-
-
-def cmd_status(repo, args):
-    g = repo.load_global()
-    if g.get("paused"):
-        print(f"flow is PAUSED: hooks allow everything until `! {flow_cmd(repo.root)} resume`")
-    fid, st = repo.active()
-    if not fid:
-        print("no active feature")
-        return
-    print(f"{fid} — {st['title']}")
-    print("phase: " + " > ".join(f"[{p}]" if p == st["phase"] else p for p in PHASES))
-    for kind in APPROVABLE:
-        if kind in st.get("approvals", {}):
-            ok = repo.approval_valid(fid, st, kind)
-            print(f"approval {kind}: {'valid' if ok else 'STALE (artifact changed since approval)'}")
-    if st.get("gates"):
-        cur = repo.gates_current(st)
-        print(f"gates: {'passed' if st['gates']['passed'] else 'FAILED'}"
-              f"{'' if cur or not st['gates']['passed'] else ' (stale: code changed since)'}")
-    problems = check(repo, fid, st)
-    if problems:
-        print("to advance:")
-        for p in problems:
-            print(f"  - {p}")
-    else:
-        print("ready: `flow advance`")
-
-
-def cmd_check(repo, args):
-    fid, st = repo.require_active()
-    problems = check(repo, fid, st)
-    for p in problems:
-        print(f"- {p}")
-    if problems:
-        sys.exit(1)
-    print(f"{st['phase']}: complete")
-
-
-def cmd_advance(repo, args):
-    fid, st = repo.require_active()
-    problems = check(repo, fid, st)
-    if problems:
-        raise FlowError("cannot advance from " + st["phase"] + ":\n" + "\n".join(f"- {p}" for p in problems))
-    nxt = PHASES[PHASES.index(st["phase"]) + 1]
-    if nxt == "spec":
-        scaffold(repo, fid, st, "spec.md")
-    elif nxt == "tickets":
-        scaffold(repo, fid, st, "ticket.md", repo.fdir(fid) / "tickets" / "T01.md")
-    elif nxt == "review":
-        scaffold(repo, fid, st, "review.md")
-    elif nxt == "ship":
-        st["reviewed_fingerprint"] = repo.fingerprint()
-    st["phase"] = nxt
-    st["history"].append({"phase": nxt, "at": now()})
-    repo.save_state(fid, st)
-    if nxt == "done":
-        g = repo.load_global()
-        g["active"] = None
-        repo.save_global(g)
-    print(f"{fid}: now in phase {nxt}")
-
-
-def cmd_back(repo, args):
-    fid, st = repo.require_active()
-    i = PHASES.index(st["phase"])
-    if i == 0 or st["phase"] == "done":
-        raise FlowError(f"cannot go back from {st['phase']}")
-    st["phase"] = PHASES[i - 1]
-    st["history"].append({"phase": st["phase"], "at": now(), "back": True})
-    repo.save_state(fid, st)
-    print(f"{fid}: back to phase {st['phase']}")
-
-
-def cmd_approve(repo, args):
-    fid, st = repo.require_active()
-    if len(args) != 1 or args[0] not in APPROVABLE:
-        raise FlowError("usage: flow approve spec|tickets")
-    kind = args[0]
-    if st["phase"] != kind:
-        raise FlowError(f"{kind} can only be approved in phase {kind} (now {st['phase']})")
-    problems = [p for p in check(repo, fid, st) if "approval" not in p]
-    if problems:
-        raise FlowError(f"{kind} is not complete:\n" + "\n".join(f"- {p}" for p in problems))
-    st.setdefault("approvals", {})[kind] = {"hash": repo.artifact_hash(fid, kind), "at": now()}
-    repo.save_state(fid, st)
-    print(f"{kind} approved; it stays approved until the file changes")
-
-
-def cmd_gates(repo, args):
-    fid, st = repo.require_active()
-    if st["phase"] not in ("build", "review"):
-        raise FlowError(f"gates run in build or review (now {st['phase']})")
-    cmds = [("standing", c) for c in repo.config.get("standing_gates", [])]
-    for t in repo.tickets(fid):
-        cmds += [(t.stem, c) for c in gate_commands(t)]
-    results, passed = [], True
-    for source, c in cmds:
-        print(f"\n== [{source}] {c}", flush=True)
-        rc = subprocess.run(c, shell=True, cwd=repo.root).returncode
-        results.append({"source": source, "command": c, "exit": rc})
-        passed = passed and rc == 0
-        if rc != 0:
-            print(f"== FAILED (exit {rc})", flush=True)
-    st["gates"] = {"passed": passed, "fingerprint": repo.fingerprint(), "at": now(), "results": results}
-    repo.save_state(fid, st)
-    print(f"\ngates {'passed' if passed else 'FAILED'} ({len(cmds)} command(s))")
-    if not passed:
-        sys.exit(1)
-
-
-def cmd_deploy(repo, args):
-    if not repo.deploy_cfg():
-        raise FlowError("no deploy config in .flow.json")
-    head = run_git(repo.root, "rev-parse", "HEAD").strip()
-    for t in repo.runs(15):
-        mark = "*" if t["head_sha"] == head else " "
-        print(f"{mark} {t['id']} {t['name']:<14} {t['status']:<9} {t['head_sha'][:7]}")
-    print(f"health: {repo.health()}")
-
-
-def cmd_pause(repo, args, paused=True):
-    g = repo.load_global()
-    g["paused"] = paused
-    repo.save_global(g)
-    print("flow paused: hooks allow everything" if paused else "flow resumed")
-
-
-def cmd_abandon(repo, args):
-    fid, st = repo.require_active()
-    st["phase"] = "abandoned"
-    st["history"].append({"phase": "abandoned", "at": now()})
-    repo.save_state(fid, st)
-    g = repo.load_global()
-    g["active"] = None
-    repo.save_global(g)
-    print(f"{fid} abandoned")
-
-
-# Starting points for `flow init`, keyed by the file that marks the stack: protected paths,
-# standing gates and codegen patterns. They are guesses the repo edits in .flow.json.
-STACKS = [
-    ("mix.exs", ["lib/", "test/", "config/", "priv/", "assets/", "mix.exs", "mix.lock"],
-     ["mix compile --warnings-as-errors", "mix format --check-formatted", "mix test"],
-     [r"\bmix\s+(phx|ecto)\.gen\.\S", r"\bmix\s+igniter\.\S", r"\bmix\s+format\b(?!.*--check-formatted)"]),
-    ("Cargo.toml", ["src/", "tests/", "Cargo.toml", "Cargo.lock"],
-     ["cargo fmt --check", "cargo clippy -- -D warnings", "cargo test"],
-     [r"\bcargo\s+fmt\b(?!.*--check)"]),
-    ("pyproject.toml", ["src/", "tests/", "pyproject.toml"],
-     ["python -m pytest"],
-     [r"\bruff\s+format\b(?!.*--check)", r"\bblack\b(?!.*--check)"]),
-    ("package.json", ["src/", "test/", "package.json", "package-lock.json"],
-     ["npm test"],
-     [r"\bprettier\b.*--write", r"\beslint\b.*--fix"]),
-]
-
-
-def deny_rules(work_rel):
-    """Permission rules backing up the hook: the user-only commands and the state files.
-    Edit(path) rules cover every file-editing tool; Claude Code ignores Write(path) ones."""
-    return [f"Bash(flow {c}:*)" for c in USER_ONLY] + [
-        f"Edit({work_rel}/{p})" for p in ("flow.json", "*/state.json")
-    ]
-
-
-def cmd_init(root, args):
-    if (root / ".flow.json").exists():
-        raise FlowError(".flow.json already exists")
-    settings = root / ".claude" / "settings.json"
-    try:
-        s = json.loads(settings.read_text()) if settings.is_file() else {}
-    except json.JSONDecodeError:
-        raise FlowError(f"{settings} is not plain JSON; nothing written")
-    stack = next((x for x in STACKS if (root / x[0]).is_file()), None)
-    marker, protected, gates, codegen = stack or (None, ["src/"], [], [])
-    write_json(root / ".flow.json", {"work_dir": "work", "protected_paths": protected,
-                                     "standing_gates": gates, "codegen": codegen})
-    repo = Repo(root)
-    standing = repo.work / "STANDING.md"
-    if not standing.exists():
-        standing.parent.mkdir(parents=True, exist_ok=True)
-        standing.write_text(repo.template("STANDING.md").replace("{project}", root.name)
-                            .replace("{work_dir}", repo.work_rel))
-    deny = s.setdefault("permissions", {}).setdefault("deny", [])
-    deny += [r for r in deny_rules(repo.work_rel) if r not in deny]
-    write_json(settings, s)
-    print(f"wrote .flow.json ({f'defaults for {marker}' if marker else 'no known stack: guessed'}),"
-          f" {repo.work_rel}/STANDING.md and deny rules in .claude/settings.json")
-    print("next: check protected_paths, standing_gates and codegen in .flow.json, fill in"
-          f" {repo.work_rel}/STANDING.md, and add a deploy section if ship should wait for CI")
-
-
-# --- hooks ---------------------------------------------------------------------
-
-
-def deny(reason):
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "deny",
-        "permissionDecisionReason": f"flow: {reason}",
-    }}))
-    return 0
-
-
-def code_edit_problem(repo):
-    fid, st = repo.active()
-    if not fid:
-        return f"no active feature; code changes go through `{flow_cmd(repo.root)} new` (or the user can `! {flow_cmd(repo.root)} pause`)"
-    if st["phase"] != "build":
-        return f"{fid} is in phase {st['phase']}; code is edited only in build"
-    return None
-
-
-def commit_problem(repo):
-    touched = [p for p in repo.changed_paths() if repo.is_protected(p)]
-    if not touched:
-        return None
-    fid, st = repo.active()
-    if not fid or st["phase"] != "ship":
-        where = f"{fid} is in phase {st['phase']}" if fid else "there is no active feature"
-        return f"commit touches code ({', '.join(touched[:3])}) but {where}; code is committed only in ship"
-    for kind in APPROVABLE:
-        if not repo.approval_valid(fid, st, kind):
-            return f"{kind} approval missing or stale"
-    if not repo.gates_current(st):
-        return "code changed since the gates passed: `flow back` to build and rerun `flow gates`"
-    if st.get("reviewed_fingerprint") != repo.fingerprint():
-        return "code changed since review passed: go back and review again"
-    return None
-
-
-def push_problem(repo):
-    cfg = repo.deploy_cfg()
-    if not cfg:
-        return None
-    try:
-        running = [t for t in repo.runs() if t["status"] in IN_FLIGHT]
-    except (FlowError, OSError) as e:
-        return f"cannot check whether a deploy is running ({e})"
-    if running:
-        return "a CI/deploy run is in flight (" + ", ".join(f"{t['name']}={t['status']}" for t in running) + "); pushing now cancels it. Wait and retry"
-    return None
-
-
-def hook_pre_tool_use(payload):
-    root = find_root(payload.get("cwd") or os.getcwd())
-    if not root:
-        return 0
-    repo = Repo(root)
-    tool, ti = payload.get("tool_name", ""), payload.get("tool_input") or {}
-    paused = repo.load_global().get("paused")
-
-    if tool in EDIT_TOOLS:
-        rel = repo.rel(ti.get("file_path") or ti.get("notebook_path") or "")
-        if repo.is_state_file(rel):
-            return deny("state files are written only by the flow CLI")
-        if not paused and repo.is_protected(rel):
-            problem = code_edit_problem(repo)
-            if problem:
-                return deny(problem)
-        return 0
-
-    if tool != "Bash":
-        return 0
-    cmds = bash_commands(ti.get("command", ""))
-    if any(USER_ONLY_CMD.search(c) for c in cmds):
-        return deny(f"approve/pause/resume/abandon are the user's: they run them as `! {flow_cmd(repo.root)} ...`")
-
-    names_state = re.compile(re.escape(repo.work_rel) + r"/(flow\.json|[^/\s]+/state\.json)")
-    writes_state = writes_code = codegen = False
-    for c in cmds:
-        c = re.sub(r"\d*>\s*/dev/null|\d*>&\d", "", c)
-        targets = [repo.rel(t) for t in REDIRECT.findall(c)]
-        mutates = bool(WRITE_HINT.search(c))
-        names_code = any(re.search(r"(^|[\s'\"=/.])" + re.escape(p) + r"(/|\b)", c) for p in repo.protected)
-        writes_state |= any(repo.is_state_file(t) for t in targets) or (mutates and bool(names_state.search(c)))
-        writes_code |= any(repo.is_protected(t) for t in targets) or (mutates and names_code)
-        codegen |= any(p.search(c) for p in repo.codegen)
-    if writes_state:
-        return deny("state files are written only by the flow CLI")
-    if paused:
-        return 0
-    if any(GIT_COMMIT.search(c) for c in cmds):
-        problem = commit_problem(repo)
-        if problem:
-            return deny(problem)
-    if any(GIT_PUSH.search(c) for c in cmds):
-        problem = push_problem(repo)
-        if problem:
-            return deny(problem)
-    if codegen or writes_code:
-        problem = code_edit_problem(repo)
-        if problem:
-            return deny(problem)
-    return 0
-
-
-def hook_session_start(payload):
-    root = find_root(payload.get("cwd") or os.getcwd())
-    if not root:
-        return 0
-    repo = Repo(root)
-    fid, st = repo.active()
-    g = repo.load_global()
-    if fid:
-        problems = check(repo, fid, st) if st["phase"] != "ship" else []
-        ctx = f"flow: active feature {fid} ({st['title']}) is in phase {st['phase']}."
-        if problems:
-            ctx += " To advance: " + "; ".join(problems)
-    else:
-        ctx = f"flow: no active feature. Code changes start with `{flow_cmd(repo.root)} new <slug> \"<title>\"`."
-    if g.get("paused"):
-        ctx += " Enforcement is PAUSED."
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}))
-    return 0
-
-
-# --- main ----------------------------------------------------------------------
-
-COMMANDS = {
-    "new": cmd_new, "status": cmd_status, "check": cmd_check, "advance": cmd_advance,
-    "back": cmd_back, "approve": cmd_approve, "gates": cmd_gates, "deploy": cmd_deploy,
-    "pause": cmd_pause, "resume": lambda r, a: cmd_pause(r, a, paused=False),
-    "abandon": cmd_abandon,
+#!/bin/sh
+# shellcheck disable=SC3013 # test -nt: POSIX since 2024, and in every sh this runs under.
+# flow launcher: runs the flow binary with this script's arguments and stdin.
+# The first of these that applies is run:
+#
+#   1. $FLOW_BIN (an absolute path).
+#   2. <root>/target/release/flow, a build of this checkout. It is rebuilt with cargo
+#      first when anything under src/ or templates/, Cargo.toml or Cargo.lock is newer.
+#   3. The release binary of VERSION for this platform, cached in
+#      ${FLOW_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/flow}/<VERSION>/<target>/flow
+#      and downloaded from the v<VERSION> GitHub release when missing. It must match
+#      the SHA256SUMS committed next to VERSION, run here, and have been built from
+#      this checkout's sources (the `source` line there). A stamp in target/ naming
+#      the verified binary skips these checks until VERSION, SHA256SUMS or a source
+#      changes.
+#   4. A build from source with cargo (step 2 from then on). Without cargo, a release
+#      built from other sources runs, with a warning.
+#
+# Failing that, it fails closed: in a repo with a .flow.json at its git root,
+# `hook pre-tool-use` denies the call and `hook session-start` says why; the CLI exits
+# with status 1. A hook outside a flow repo prints nothing and never downloads or
+# builds. In hook mode only the binary's output reaches stdout, and the binary runs as
+# a child rather than with exec, so that one the shell cannot execute (exit 126 or 127)
+# is denied too.
+# With a verified binary, a call costs at most one `uname`: this runs on every tool call.
+
+# zsh: POSIX globbing (an empty directory is not an error) and word splitting.
+[ -z "${ZSH_VERSION:-}" ] || emulate sh
+
+REPO=https://github.com/evedes/zyker-flow
+
+self=$0
+case $self in /*) ;; *) self=$PWD/$self ;; esac
+while [ -h "$self" ]; do
+	link=$(readlink "$self") || break
+	case $link in /*) self=$link ;; *) self=${self%/*}/$link ;; esac
+done
+case $self in
+*/./* | */../* | *//*) d=$(cd -P "${self%/*}" && pwd -P) && self=$d/${self##*/} ;;
+esac
+FLOW_SELF=$self
+export FLOW_SELF
+root=${self%/*/*}
+
+hook=
+[ "${1:-}" = hook ] && [ $# -ge 2 ] && hook=$2
+
+dev=$root/target/release/flow
+[ -x "$dev.exe" ] && dev=$dev.exe
+stamp=$root/target/.flow-release
+cached=
+why=
+
+# --- helpers ---------------------------------------------------------------------
+
+note() { printf 'flow: %s\n' "$*" >&2; }
+
+# because REASON: adds REASON to $why, the explanation for having no binary.
+because() { why=${why:+$why; }$*; }
+
+# A relative directory from the environment would resolve inside the guarded repo.
+absolute() { case $1 in /*) return 0 ;; *) return 1 ;; esac; }
+
+# newer TARGET PATH...: is a PATH, or a file under it, newer than TARGET?
+newer() {
+	t=$1
+	shift
+	for f; do
+		if [ -d "$f" ]; then
+			newer "$t" "$f"/* && return 0
+		elif [ "$f" -nt "$t" ]; then
+			return 0
+		fi
+	done
+	return 1
 }
 
+# stale TARGET [PATH...]: is a source cargo builds from, or a PATH, newer than TARGET?
+stale() {
+	t=$1
+	shift
+	newer "$t" "$root/src" "$root/templates" "$root/Cargo.toml" "$root/Cargo.lock" "$@"
+}
 
-def main(argv):
-    if len(argv) >= 2 and argv[0] == "hook":
-        try:
-            payload = json.load(sys.stdin)
-        except json.JSONDecodeError:
-            payload = {}
-        handler = {"pre-tool-use": hook_pre_tool_use, "session-start": hook_session_start}.get(argv[1])
-        try:
-            return handler(payload) if handler else 0
-        except Exception as e:  # a broken hook must say so, not silently allow
-            if argv[1] == "pre-tool-use":
-                return deny(f"hook error: {e}")
-            return 0
-    if not argv or argv[0] not in ("init", *COMMANDS):
-        print(__doc__.strip().split("\n\n")[0])
-        print("\ncommands: " + ", ".join(("init", *COMMANDS)))
-        return 0 if not argv else 2
-    try:
-        if argv[0] == "init":
-            root = git_root(os.getcwd())
-            if not root:
-                raise FlowError("not inside a git repository")
-            cmd_init(root, argv[1:])
-            return 0
-        root = find_root(os.getcwd())
-        if not root:
-            print("flow: no .flow.json at the git root; this repo does not use flow (`flow init` opts it in)",
-                  file=sys.stderr)
-            return 2
-        COMMANDS[argv[0]](Repo(root), argv[1:])
-    except FlowError as e:
-        print(f"flow: {e}", file=sys.stderr)
-        return 1
-    return 0
+# run BIN ARGS...: runs the binary and exits with its status. A hook runs it as a
+# child, so that a binary the shell cannot execute fails closed (and a cached one is
+# dropped, to be downloaded and verified again).
+run() {
+	[ -n "$hook" ] || exec "$@"
+	"$@"
+	rc=$?
+	[ $rc -eq 126 ] || [ $rc -eq 127 ] || exit $rc
+	what=$1
+	[ "$1" = "${FLOW_BIN:-}" ] && what="FLOW_BIN=$1"
+	[ "$1" = "$cached" ] && rm -f "$cached" "$stamp"
+	fail "$what cannot be executed (exit $rc)"
+}
 
+# Is the git root of the working directory a flow repo?
+in_flow_repo() {
+	if command -v git >/dev/null 2>&1; then
+		top=$(git rev-parse --show-toplevel </dev/null 2>/dev/null) || return 1
+	else
+		top=$PWD
+		until [ -e "$top/.git" ]; do
+			[ -n "$top" ] || return 1
+			top=${top%/*}
+		done
+	fi
+	[ -f "$top/.flow.json" ]
+}
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+# fail WHY: there is no binary to run; fails closed as the mode requires.
+fail() {
+	[ -z "$hook" ] || cat >/dev/null 2>&1
+	case $hook in
+	'')
+		note "no flow binary: $1"
+		exit 1
+		;;
+	pre-tool-use)
+		in_flow_repo || exit 0
+		json "flow: hook error: no flow binary: $1"
+		printf '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "%s"}}\n' "$json"
+		;;
+	session-start)
+		in_flow_repo || exit 0
+		json "flow: no flow binary ($1), so the flow hook denies every Edit, Write, MultiEdit, NotebookEdit and Bash call in this repo. Tell the user: the plugin's bin/flow needs network access to download its release binary, cargo to build it, or FLOW_BIN set to one."
+		printf '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$json"
+		;;
+	esac
+	exit 0
+}
+
+# json STRING: sets $json to STRING as the inside of a JSON string (control characters
+# become spaces).
+json() {
+	json=$(printf '%s' "$1" | tr '\n' ' ' | LC_ALL=C sed 's/[[:cntrl:]]/ /g; s/[\\"]/\\&/g')
+}
+
+have_cargo() {
+	cargo=$(command -v cargo) || cargo=${CARGO_HOME:-${HOME:-}/.cargo}/bin/cargo
+	[ -x "$cargo" ]
+}
+
+# build: cargo builds the plugin into <root>/target, its output on stderr. The build
+# gets the time it started, so that a source saved meanwhile is built next time.
+build() {
+	have_cargo || { because "no cargo to build it from source" && return 1; }
+	marker=$root/target/.flow-build.$$
+	mkdir -p "$root/target" && touch "$marker"
+	if ! "$cargo" build --release --locked --quiet --manifest-path "$root/Cargo.toml" \
+		--target-dir "$root/target" </dev/null >&2; then
+		rm -f "$marker"
+		because "cargo build --release failed in $root"
+		return 1
+	fi
+	[ -x "$root/target/release/flow.exe" ] && dev=$root/target/release/flow.exe
+	touch -r "$marker" "$dev" 2>/dev/null || touch "$dev"
+	rm -f "$marker"
+	[ -x "$dev" ] || { because "cargo build left no $dev" && return 1; }
+}
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$@"
+	else
+		shasum -a 256 "$@"
+	fi
+}
+
+# pinned NAME: prints NAME's hash in the committed SHA256SUMS.
+pinned() {
+	[ -r "$root/SHA256SUMS" ] || return 1
+	while read -r h n || [ -n "$h" ]; do
+		[ "${n#\*}" = "$1" ] && echo "$h" && return 0
+	done <"$root/SHA256SUMS"
+	return 1
+}
+
+# The hash of this checkout's sources: the SHA-256 of `sha256sum` over them, sorted
+# by path (scripts/source-hash prints the same).
+source_hash() {
+	(cd "$root" && find src templates Cargo.toml Cargo.lock -type f 2>/dev/null |
+		LC_ALL=C sort | while IFS= read -r f; do sha256 "$f"; done) |
+		sha256 | { read -r h _ && echo "$h"; }
+}
+
+# own_sources: was the pinned release built from this checkout's sources?
+own_sources() {
+	[ -f "$root/Cargo.toml" ] || return 0
+	want=$(pinned source) && [ "$(source_hash)" = "$want" ] && return 0
+	because "v$ver was released from other sources than $root"
+	return 1
+}
+
+# verify FILE: is FILE the pinned binary $name, and does it run here? Sets $err if not.
+verify() {
+	sum=$(sha256 <"$1") || { err="cannot hash $1" && return 1; }
+	sum=${sum%% *}
+	[ "$sum" = "$pin" ] || { err="checksum mismatch for $name v$ver (got $sum, want $pin)" && return 1; }
+	chmod 755 "$1" 2>/dev/null
+	"$1" </dev/null >/dev/null 2>&1 || { err="$name v$ver does not run here (exit $?)" && return 1; }
+}
+
+# fetch URL FILE: one attempt in bounded time, its output on stderr. Sets $err.
+fetch() {
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL --connect-timeout 10 --max-time 60 -o "$2" "$1" </dev/null >&2 ||
+			{ err="downloading $1 failed (curl exit $?)" && return 1; }
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -T 15 -t 1 -O "$2" "$1" </dev/null >&2 ||
+			{ err="downloading $1 failed (wget exit $?)" && return 1; }
+	else
+		err="no curl or wget to download $1"
+		return 1
+	fi
+}
+
+# Did a download fail in the last five minutes? Sets $msg to why it did.
+failed_recently() {
+	[ -f "$failed" ] && read -r t msg <"$failed" && now=$(date +%s) || return 1
+	case $t in '' | *[!0-9]*) return 1 ;; esac
+	[ "$t" -le "$now" ] && [ $((now - t)) -lt 300 ]
+}
+
+# download: fetches the release binary and installs it as $cached once verified. A
+# failure is remembered for five minutes, so an offline machine does not wait on
+# every call.
+download() {
+	dir=${cached%/*}
+	failed=$dir/.failed
+	if failed_recently; then
+		because "$msg (not retried for 5 minutes)"
+		return 1
+	fi
+	if ! { mkdir -p "$dir" && tmp=$(mktemp "$dir/.download.XXXXXX"); }; then
+		because "cannot create a temporary file in $dir"
+		return 1
+	fi
+	if ! fetch "$REPO/releases/download/v$ver/$name" "$tmp"; then
+		rm -f "$tmp"
+		printf '%s %s\n' "$(date +%s)" "$err" >"$failed" 2>/dev/null
+		because "$err"
+		return 1
+	fi
+	verify "$tmp" || { rm -f "$tmp" && because "$err" && return 1; }
+	# rename(2) within a directory: a concurrent launcher sees the old file or the new.
+	mv -f "$tmp" "$cached" || { rm -f "$tmp" && because "cannot install $cached" && return 1; }
+	rm -f "$failed"
+}
+
+# release: the pinned release binary, verified (downloaded if need be), as $cached.
+release() {
+	if [ -x "$cached" ] && verify "$cached"; then
+		return 0
+	fi
+	download
+}
+
+# --- 1 and 2: FLOW_BIN and the dev build -------------------------------------------
+
+if [ -n "${FLOW_BIN:-}" ]; then
+	absolute "$FLOW_BIN" || fail "FLOW_BIN=$FLOW_BIN is not an absolute path"
+	[ -f "$FLOW_BIN" ] && [ -x "$FLOW_BIN" ] && run "$FLOW_BIN" "$@"
+	fail "FLOW_BIN=$FLOW_BIN is not an executable file"
+fi
+
+if [ -x "$dev" ]; then
+	# A hook outside a flow repo does nothing, so there the previous build will do.
+	if stale "$dev" && { [ -z "$hook" ] || in_flow_repo; }; then
+		build || note "$why; running the previous build"
+	fi
+	run "$dev" "$@"
+fi
+
+# --- 3: the release binary -----------------------------------------------------------
+
+ver=
+[ -r "$root/VERSION" ] && read -r ver <"$root/VERSION"
+if absolute "${FLOW_CACHE_DIR:-}"; then
+	cache=$FLOW_CACHE_DIR
+elif absolute "${XDG_CACHE_HOME:-}"; then
+	cache=$XDG_CACHE_HOME/flow
+elif absolute "${HOME:-}"; then
+	cache=$HOME/.cache/flow
+else
+	cache=
+fi
+platform=$(uname -s -m 2>/dev/null)
+case $platform in
+'Linux x86_64' | 'Linux amd64') triple=x86_64-unknown-linux-musl ;;
+'Linux aarch64' | 'Linux arm64') triple=aarch64-unknown-linux-musl ;;
+'Darwin x86_64') triple=x86_64-apple-darwin ;;
+'Darwin arm64' | 'Darwin aarch64') triple=aarch64-apple-darwin ;;
+*) triple= ;;
+esac
+cached=$cache/$ver/$triple/flow
+
+verified=
+[ -f "$stamp" ] && read -r verified <"$stamp"
+if [ "$verified" = "$cached" ] && [ -x "$cached" ] && ! [ "$cached" -nt "$stamp" ] &&
+	! stale "$stamp" "$root/VERSION" "$root/SHA256SUMS"; then
+	run "$cached" "$@"
+fi
+
+# --- nothing verified to run -----------------------------------------------------------
+
+# A hook outside a flow repo does nothing, so it does not download or build either.
+[ -z "$hook" ] || in_flow_repo || { cat >/dev/null 2>&1; exit 0; }
+
+# $name is set once there is a pinned release binary to run.
+name=
+if [ -z "$ver" ]; then
+	because "no VERSION file in $root"
+elif [ -z "$cache" ]; then
+	because "no cache directory (HOME is not set or not absolute)"
+elif [ -z "$triple" ]; then
+	because "no release binary for ${platform:-this platform}"
+elif ! pin=$(pinned "flow-$triple"); then
+	because "no checksum for flow-$triple v$ver in $root/SHA256SUMS"
+elif ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+	because "no sha256sum or shasum to verify the release binary"
+else
+	name=flow-$triple
+fi
+
+own=
+if [ -n "$name" ] && own_sources; then
+	own=1
+	if release; then
+		{ mkdir -p "${stamp%/*}" && printf '%s\n' "$cached" >"$stamp"; } 2>/dev/null
+		run "$cached" "$@"
+	fi
+fi
+
+if [ -f "$root/Cargo.toml" ]; then
+	if have_cargo; then
+		note "$why; building it from source"
+		build && run "$dev" "$@"
+	else
+		because "no cargo to build it from source"
+	fi
+fi
+
+# A release from other sources, as the last resort.
+if [ -n "$name" ] && [ -z "$own" ] && release; then
+	note "warning: $why; running the release"
+	run "$cached" "$@"
+fi
+
+fail "$why"

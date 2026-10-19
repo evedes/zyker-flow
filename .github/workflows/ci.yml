@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      # /bin/sh is dash on ubuntu and bash on macOS; the launcher suite runs again under
+      # bash on ubuntu and zsh on macOS.
+      - run: cargo test --locked
+      - name: Launcher tests under another shell
+        run: FLOW_TEST_SH=$(command -v ${{ runner.os == 'Linux' && 'bash' || 'zsh' }}) cargo test --locked --test launcher
+
+      - name: Lint the launcher
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh bin/flow scripts/smoke scripts/source-hash scripts/pin-release
+
+  # bin/flow runs the release binary SHA256SUMS pins, and only for the sources it was
+  # built from: on main, VERSION, Cargo.toml, SHA256SUMS and the published release must
+  # agree (see README, "Releasing").
+  release-pin:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: VERSION, Cargo.toml and the pinned release agree
+        run: |
+          ver=$(cat VERSION)
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$cargo_version" != "$ver" ]; then
+            echo "::error::Cargo.toml version $cargo_version does not match VERSION $ver"
+            exit 1
+          fi
+          if [ ! -f SHA256SUMS ]; then
+            echo "::warning::no SHA256SUMS: bin/flow builds flow from source until a release is pinned"
+            exit 0
+          fi
+          url=https://github.com/evedes/zyker-flow/releases/download/v$ver/SHA256SUMS
+          if ! curl -fsSL -o released "$url"; then
+            echo "::error::VERSION is $ver but there is no published v$ver release to match SHA256SUMS"
+            exit 1
+          fi
+          if ! cmp -s released SHA256SUMS; then
+            echo "::error::SHA256SUMS does not match the v$ver release's: run scripts/pin-release"
+            exit 1
+          fi
+          if ! grep -q "^$(scripts/source-hash)  source\$" SHA256SUMS; then
+            echo "::warning::src/, templates/ or Cargo.* changed since v$ver: users without cargo run v$ver until a new release is pinned"
+          fi
