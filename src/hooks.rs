@@ -7,10 +7,9 @@ use crate::error::{bail, Error, Result};
 use crate::paths::flow_cmd;
 use crate::repo::{find_root, Repo};
 use crate::shell::{
-    bash_commands, redirect_targets, without_discards, GIT_COMMIT, GIT_PUSH, MUTATES, USER_ONLY,
-    USER_ONLY_CMD,
+    bash_commands, commits_index_only, redirect_targets, without_discards, GIT_COMMIT, GIT_PUSH,
+    MUTATES, USER_ONLY, USER_ONLY_CMD,
 };
-use regex::Regex;
 use serde_json::{json, Value};
 use std::io;
 use std::path::PathBuf;
@@ -90,8 +89,10 @@ fn code_edit_problem(repo: &Repo) -> Result<Option<String>> {
     })
 }
 
-fn commit_problem(repo: &Repo) -> Result<Option<String>> {
-    let mut touched = repo.changed_paths()?;
+/// Why a commit is refused: judged by what is staged when `index_only`, else by the
+/// whole working tree.
+fn commit_problem(repo: &Repo, index_only: bool) -> Result<Option<String>> {
+    let mut touched = if index_only { repo.staged_paths()? } else { repo.changed_paths()? };
     touched.retain(|p| repo.is_protected(p));
     if touched.is_empty() {
         return Ok(None);
@@ -191,10 +192,10 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
     }
     // What a mutating command must not name: a state file, a protected path.
     let work = regex::escape(&repo.work_rel);
-    let names_state = Regex::new(&format!(r"{work}/(flow\.json|[^/\s]+/state\.json)"))?;
+    let names_state = repo.names(&format!(r#"{work}/(?:flow\.json|[^/\s'"]+/state\.json)"#))?;
     let protected: Vec<String> = repo.protected.iter().map(|p| regex::escape(p)).collect();
-    let names_code = format!(r#"(^|[\s'"=/.])(?:{})(/|\b)"#, protected.join("|"));
-    let names_code = (!protected.is_empty()).then(|| Regex::new(&names_code)).transpose()?;
+    let names_code = (!protected.is_empty()).then(|| repo.names(&protected.join("|")));
+    let names_code = names_code.transpose()?;
     let (mut writes_state, mut writes_code, mut codegen) = (false, false, false);
     for c in &cmds {
         let c = without_discards(c);
@@ -215,7 +216,7 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
         return Ok(None);
     }
     if cmds.iter().any(|c| GIT_COMMIT.is_match(c)) {
-        if let Some(problem) = commit_problem(&repo)? {
+        if let Some(problem) = commit_problem(&repo, commits_index_only(&cmds))? {
             return Ok(Some(problem));
         }
     }
@@ -235,18 +236,21 @@ fn session_start(payload: Value) -> Result<Option<String>> {
     let Some(repo) = open_repo(&payload)? else {
         return Ok(None);
     };
-    let mut ctx = match repo.active()? {
-        Some((fid, st)) => {
+    // A missing state file of the active feature is reported, not an error.
+    let active = repo.active().map_err(|e| format!("flow: {e}."));
+    let mut ctx = match active {
+        Err(broken) => broken,
+        Ok(Some((fid, st))) => {
             let mut ctx =
                 format!("flow: active feature {fid} ({}) is in phase {}.", st.title, st.phase);
             let problems =
-                if st.phase == Phase::Ship { Vec::new() } else { check(&repo, &fid, &st)? };
+                if st.phase == Phase::Ship { Vec::new() } else { check(&repo, &fid, &st, true)? };
             if !problems.is_empty() {
                 ctx += &format!(" To advance: {}", problems.join("; "));
             }
             ctx
         }
-        None => {
+        Ok(None) => {
             let cmd = flow_cmd(&repo.root);
             format!(
                 "flow: no active feature. Code changes start with `{cmd} new <slug> \"<title>\"`."

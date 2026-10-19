@@ -349,6 +349,158 @@ fn ship_to_done_after_commit() {
 }
 
 #[test]
+fn ship_needs_the_feature_folder_committed() {
+    let t = Flow::new();
+    t.to_ship();
+    t.git(&["add", "lib"]);
+    t.git(&["commit", "-qm", "code only"]);
+    assert_in("work/001-hello/", &t.flow_any(&["advance"]).stderr);
+    t.git(&["add", "work"]);
+    t.git(&["commit", "-qm", "record"]);
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "done");
+}
+
+#[test]
+fn gates_run_only_in_build() {
+    let t = Flow::new();
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    t.fwrite("review.md", REVIEW);
+    t.write("README.md", "changed after the review\n");
+    assert_in("gates run in build", &t.flow_any(&["gates"]).stderr);
+    assert_in("code changed since the gates passed", &t.flow_any(&["advance"]).stderr);
+}
+
+#[test]
+fn code_changed_after_ship_needs_a_new_review() {
+    let t = Flow::new();
+    t.to_ship();
+    t.flow(&["back"]);
+    t.flow(&["back"]);
+    t.write("lib/app.ex", "never reviewed\n");
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    assert_in("pass", &t.fread("review-1.md")); // the old round, kept
+    assert_in("TODO(flow)", &t.flow_any(&["advance"]).stderr);
+    t.fwrite("review.md", REVIEW);
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "ship");
+}
+
+#[test]
+fn back_to_spec_keeps_the_tickets() {
+    let t = Flow::new();
+    t.to_build();
+    let tickets = t.fdir().join("tickets");
+    fs::rename(tickets.join("T01.md"), tickets.join("T01-hello.md")).unwrap();
+    t.flow(&["back"]);
+    t.flow(&["back"]);
+    t.flow(&["advance"]);
+    let names: Vec<String> = fs::read_dir(&tickets)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["T01-hello.md"]);
+}
+
+#[test]
+fn approved_artifacts_changed_later_block_gates_and_advance() {
+    let t = Flow::new();
+    t.to_build();
+    t.fwrite("tickets/T01.md", &TICKET.replace("test -f lib/app.ex", "true"));
+    assert_in("tickets changed since it was approved", &t.flow_any(&["gates"]).stderr);
+    t.fwrite("tickets/T01.md", TICKET);
+    t.fwrite("spec.md", &format!("{SPEC}\nchanged\n"));
+    assert_in("spec changed since it was approved", &t.flow_any(&["check"]).stdout);
+    t.flow(&["back"]);
+    assert_in("spec changed", &t.flow_any(&["approve", "tickets"]).stderr);
+}
+
+#[test]
+fn approve_checks_sections_named_approval() {
+    let t = Flow::new();
+    t.write(
+        "work/templates/spec.md",
+        "## Goal\nTODO(flow): goal\n\n## Approval notes\nTODO(flow): who\n",
+    );
+    t.flow(&["new", "hello"]);
+    t.fwrite("research.md", RESEARCH);
+    t.flow(&["advance"]);
+    t.fwrite("spec.md", "## Goal\nHi.\n");
+    assert_in("'## approval notes' is missing", &t.flow_any(&["approve", "spec"]).stderr);
+}
+
+#[test]
+fn missing_state_of_the_active_feature_is_reported() {
+    let t = Flow::new();
+    t.flow(&["new", "hello"]);
+    t.git(&["add", "work/flow.json"]);
+    t.git(&["commit", "-qm", "track flow.json"]);
+    t.git(&["clean", "-fdq", "work/"]);
+    assert_in("has no work/001-hello/state.json", &t.flow_any(&["status"]).stderr);
+    assert_in("abandon", &denied(t.edit("lib/app.ex")));
+    let r = t.hook_raw("session-start", json!({"cwd": t.root}).to_string());
+    let ctx = &parse(&r.stdout)["hookSpecificOutput"]["additionalContext"];
+    assert_in("has no work/001-hello/state.json", ctx.as_str().unwrap());
+    t.flow(&["abandon"]);
+    t.flow(&["new", "next"]);
+}
+
+#[test]
+fn new_numbers_the_slug_itself() {
+    let t = Flow::new();
+    t.flow(&["new", "003-hello-there"]);
+    assert!(t.path("work/001-hello-there").is_dir());
+    t.flow(&["abandon"]);
+    assert_in("no letters or digits", &t.flow_any(&["new", "!!!"]).stderr);
+}
+
+#[test]
+fn commit_of_staged_docs_is_allowed_mid_feature() {
+    let t = Flow::new();
+    t.to_build();
+    t.write("lib/app.ex", "wip\n");
+    t.write("README.md", "more docs\n");
+    t.git(&["add", "README.md"]);
+    assert_eq!(t.bash("git commit -m 'docs: more'"), None);
+    assert_eq!(t.bash("git commit -qm docs --author='a <a@b>'"), None);
+    for c in [
+        "git commit -am docs",
+        "git commit -m docs lib/app.ex",
+        "git commit -m docs -- README.md",
+        "git add -A && git commit -m docs",
+        "git commit -p -m docs",
+        "git commit --all -m x",
+        "git commit -m \"$(git add -A)\"",
+        "git commit -m `git add -A`",
+        "git commit -F <(git add -A)",
+    ] {
+        assert_in("committed only in ship", &t.bash(c).unwrap_or_default());
+    }
+    t.git(&["add", "lib/app.ex"]);
+    assert_in("committed only in ship", &denied(t.bash("git commit -m docs")));
+}
+
+#[test]
+fn paths_name_code_only_inside_the_repo() {
+    let t = Flow::new();
+    t.flow(&["new", "hello"]);
+    let root = t.root.display().to_string();
+    let code = "phase explore";
+    for c in [format!("rm {root}/lib/app.ex"), "rm -rf ./lib".into(), "rm \"$(pwd)/lib/x\"".into()]
+    {
+        assert_in(code, &denied(t.bash(&c)));
+    }
+    assert_in("state files", &denied(t.bash(&format!("rm {root}/work/flow.json"))));
+    for c in ["cp README.md /tmp/lib/README.md", "rm /x/mix.exs", "rm mix.exs.bak"] {
+        assert_eq!(t.bash(c), None, "{c}");
+    }
+}
+
+#[test]
 fn pause_lifts_code_gates_but_not_state_protection() {
     let t = Flow::new();
     t.flow(&["new", "hello"]);
@@ -439,7 +591,7 @@ fn help_and_usage_errors() {
         usage("tickets can only be approved in phase tickets (now explore)")
     );
     assert_eq!(err(&t, &["back"]), usage("cannot go back from explore"));
-    assert_eq!(err(&t, &["gates"]), usage("gates run in build or review (now explore)"));
+    assert_eq!(err(&t, &["gates"]), usage("gates run in build (now explore)"));
     let todo = "- research.md: still contains TODO(flow) placeholders\n\
                 - research.md: 1 unanswered item(s) in '## open questions'";
     assert_eq!(err(&t, &["advance"]), usage(&format!("cannot advance from explore:\n{todo}")));
@@ -893,6 +1045,12 @@ fn bash_edge_cases() {
         ("cat > /tmp/x <<\"EOF\"\nrm -rf lib\nEOF", Allowed),
         ("sh <<EOF\nrm lib/app.ex", Code),
         ("cat <<A > /tmp/a; sh <<B\nx\nA\nrm lib/app.ex\nB", Code),
+        ("cat <<EOF | sh\nrm lib/app.ex\nEOF", Code),
+        ("cat <<'EOF' |& bash\nrm -rf lib\nEOF", Code),
+        ("cat <<EOF || true\nrm lib/app.ex\nEOF", Allowed),
+        ("cat <<< foo\necho x > lib/app.ex", Code),
+        ("echo $((1<<2))\necho x > lib/app.ex", Code),
+        ("echo $(( 1 << 2 ))\nrm lib/app.ex", Code),
         ("X=1 cat <<EOF > /tmp/x\nrm -rf lib\nEOF", Allowed),
         ("tee lib/app.ex < /dev/null", Code),
         ("cat f | tee -a lib/app.ex", Code),
@@ -907,12 +1065,16 @@ fn bash_edge_cases() {
         ("ln -s x lib/y", Code),
         ("touch libfoo", Allowed),
         ("touch ./lib", Code),
-        ("touch src/lib", Code),
-        ("rm -rf lib.bak", Code),
+        ("touch src/lib", Allowed),
+        ("rm -rf lib.bak", Allowed),
+        ("rm -rf /tmp/lib/cache", Allowed),
+        ("rm $PWD/lib/app.ex", Code),
+        ("rm ${PWD}/lib/app.ex", Code),
+        ("rm lib*", Code),
         ("mv a 'lib/b'", Code),
         ("cp x=lib/y z", Code),
         ("truncate -s0 mix.exs", Code),
-        ("rm mix.exs.orig", Code),
+        ("rm mix.exs.orig", Allowed),
         ("rm mix_exs", Allowed),
         ("mix format --check-formatted lib/x.ex; mix format", Code),
         ("mix ecto.gen.migration add", Code),
@@ -934,7 +1096,8 @@ fn bash_edge_cases() {
         ("FLOW=1 flow pause", User),
         ("/usr/bin/flow approve tickets", User),
         ("flowapprove", Allowed),
-        ("rm work/001-hello/state.json.bak", State),
+        ("rm work/001-hello/state.json.bak", Allowed),
+        ("rm /tmp/work/flow.json", Allowed),
         ("echo > work/001-hello/state.json.bak", Allowed),
         ("echo x > work/flow.json.tmp", Allowed),
         ("rm work/x/y/state.json", Allowed),
@@ -945,7 +1108,10 @@ fn bash_edge_cases() {
         ("echo x >> work/flow.json", State),
         ("ls work/flow.json && rm -f work/flow.json", State),
         ("git push", Allowed),
-        ("git commit -m x", Commit),
+        // A lone commit takes only what is staged: lib/x.ex is not.
+        ("git commit -m x", Allowed),
+        ("git commit -am x", Commit),
+        ("git commit -m \"$(git add -A)\"", Commit),
         ("git -c a=b commit -m x", Commit),
         ("git --no-pager commit", Commit),
         ("git commit-tree x", Commit),
@@ -1136,19 +1302,27 @@ fn flow_self_names_the_cli_when_flow_is_not_on_path() {
     t.set_env("FLOW_SELF", t.path("tools/link"));
     assert_eq!(no_feature(&t), want);
 
-    // A `flow` on PATH wins.
+    // A `flow` on PATH wins when it runs this one: as a link, or a script naming it,
+    // expanded from the environment. Another flow on PATH does not.
     let stubs = TempDir::new();
     let stub = stubs.path().join("flow");
-    write(&stub, "#!/bin/sh\n");
-    chmod_x(&stub);
     let mut path = stubs.path().as_os_str().to_owned();
     path.push(":");
     path.push(path_without_flow());
     t.set_env("PATH", path);
-    assert_eq!(
-        no_feature(&t),
-        "flow: no active feature; start one with `flow new <slug> \"<title>\"`\n"
-    );
+    let bare = "flow: no active feature; start one with `flow new <slug> \"<title>\"`\n";
+    write(&stub, "#!/bin/sh\necho another flow\n");
+    chmod_x(&stub);
+    assert_eq!(no_feature(&t), want);
+    write(&stub, format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", outside.display()));
+    assert_eq!(no_feature(&t), bare);
+    t.set_env("FLOW_TEST_DIR", other.path());
+    write(&stub, "#!/bin/sh\nexec \"${FLOW_TEST_DIR}/bin/flow\" \"$@\"\n");
+    assert_eq!(no_feature(&t), bare);
+    fs::remove_file(&stub).unwrap();
+    symlink(&outside, &stub).unwrap();
+    chmod_x(&outside);
+    assert_eq!(no_feature(&t), bare);
 }
 
 // --- text that is not UTF-8: an error, never a pass ----------------------------------
@@ -1392,7 +1566,7 @@ fn symlinks_resolve_as_realpath_does() {
     symlink("lib", t.path("link")).unwrap();
     symlink("loop2", t.path("loop1")).unwrap();
     symlink("loop1", t.path("loop2")).unwrap();
-    let none = "flow: no active feature; code changes go through `flow new`";
+    let none = "flow: no active feature; code changes go through `";
     for rel in ["alias.ex", "aliasdir/x.ex", "nonexist/../link/x.ex", "README.md/../link/x.ex"] {
         assert_in(none, &denied(t.edit(rel)));
     }
@@ -1404,7 +1578,7 @@ fn symlinks_resolve_as_realpath_does() {
 #[test]
 fn a_heredoc_word_is_letters_numbers_and_underscores() {
     let t = Flow::new();
-    let none = "flow: no active feature; code changes go through `flow new`";
+    let none = "flow: no active feature; code changes go through `";
     // Bash ends these heredocs at `EOF²`, `E²` and `EOF\u{301}`, and runs what follows.
     for cmd in [
         "cat <<EOF²\nEOF²\nrm -rf lib\n",
@@ -1423,7 +1597,7 @@ fn a_payload_that_is_not_strict_json_fails_closed() {
     // in a flow repo rather than judged.
     let t = Flow::new();
     let root = t.root.display().to_string();
-    let none = "flow: no active feature; code changes go through `flow new`";
+    let none = "flow: no active feature; code changes go through `";
     let payload = |command: &str, extra: &str| {
         format!(
             r#"{{"cwd": "{root}", "tool_name": "Bash", "tool_input": {{"command": "{command}"{extra}}}}}"#

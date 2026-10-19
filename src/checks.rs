@@ -13,9 +13,25 @@ use std::sync::LazyLock;
 /// `\w` is a letter, a number or `_`: a combining mark after "pass" ends the word.
 static VERDICT_PASS: LazyLock<Regex> = regex!(r"(?i)^[^\p{L}\p{N}_]*pass(?:[^\p{L}\p{N}_]|$)");
 
-pub fn check(repo: &Repo, fid: &str, st: &State) -> Result<Vec<String>> {
+/// Approvals given in an earlier phase whose artifact has changed since.
+pub fn stale_approvals(repo: &Repo, fid: &str, st: &State) -> Result<Vec<String>> {
+    let at = Phase::ALL.iter().position(|&p| p == st.phase).unwrap_or(0);
+    let mut stale = Vec::new();
+    for (i, kind) in Phase::ALL.iter().enumerate().filter(|(_, k)| Phase::APPROVABLE.contains(k)) {
+        if i < at && !repo.approval_valid(fid, st, *kind)? {
+            stale.push(format!(
+                "{kind} changed since it was approved: restore it, or `flow back` to {kind} \
+                 and ask for a new approval"
+            ));
+        }
+    }
+    Ok(stale)
+}
+
+/// What blocks leaving the current phase; `flow approve` asks without `own_approval`.
+pub fn check(repo: &Repo, fid: &str, st: &State, own_approval: bool) -> Result<Vec<String>> {
     let d = repo.fdir(fid);
-    let mut problems = Vec::new();
+    let mut problems = stale_approvals(repo, fid, st)?;
     let approval = |what: &str, kind: Phase| {
         let cmd = flow_cmd(&repo.root);
         format!("{what} the user's approval: `! {cmd} approve {kind}`")
@@ -29,7 +45,8 @@ pub fn check(repo: &Repo, fid: &str, st: &State) -> Result<Vec<String>> {
             problems.extend(check_doc(doc.as_ref(), &required, name));
             let open = doc.map(|doc| unchecked_boxes(&doc.sections, "open questions", name));
             problems.extend(open.flatten());
-            if spec && problems.is_empty() && !repo.approval_valid(fid, st, Phase::Spec)? {
+            let need = spec && own_approval && problems.is_empty();
+            if need && !repo.approval_valid(fid, st, Phase::Spec)? {
                 problems.push(approval("spec.md needs", Phase::Spec));
             }
         }
@@ -48,7 +65,8 @@ pub fn check(repo: &Repo, fid: &str, st: &State) -> Result<Vec<String>> {
                     problems.push(format!("{label}: {why}"));
                 }
             }
-            if problems.is_empty() && !repo.approval_valid(fid, st, Phase::Tickets)? {
+            let need = own_approval && problems.is_empty();
+            if need && !repo.approval_valid(fid, st, Phase::Tickets)? {
                 problems.push(approval("tickets need", Phase::Tickets));
             }
         }
@@ -70,17 +88,18 @@ pub fn check(repo: &Repo, fid: &str, st: &State) -> Result<Vec<String>> {
                 problems.push(why.into());
             }
         }
-        Phase::Ship => problems.extend(ship_problems(repo)?),
+        Phase::Ship => problems.extend(ship_problems(repo, fid)?),
         Phase::Done | Phase::Abandoned => {}
     }
     Ok(problems)
 }
 
-fn ship_problems(repo: &Repo) -> Result<Vec<String>> {
+fn ship_problems(repo: &Repo, fid: &str) -> Result<Vec<String>> {
     let mut problems = Vec::new();
-    let work = format!("{}/", repo.work_rel);
+    // The feature's folder is its record and lands with the code; the rest of work_dir needn't.
+    let (work, own) = (format!("{}/", repo.work_rel), format!("{}/{fid}/", repo.work_rel));
     let mut dirty = repo.changed_paths()?;
-    dirty.retain(|p| !p.starts_with(&work));
+    dirty.retain(|p| !p.starts_with(&work) || p.starts_with(&own));
     if !dirty.is_empty() {
         let shown = dirty[..dirty.len().min(5)].join(", ");
         problems.push(format!("uncommitted changes: {shown}"));

@@ -94,28 +94,81 @@ pub fn under(path: &str, dir: &str) -> bool {
     path.strip_prefix(dir).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// Is there an executable `name` on $PATH?
-fn on_path(name: &str) -> bool {
+/// The first executable `name` on $PATH, the way the shell finds it.
+fn on_path(name: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH").unwrap_or_else(|| "/bin:/usr/bin".into());
-    let executable = |p: PathBuf| {
+    let executable = |p: &PathBuf| {
         fs::metadata(p).is_ok_and(|m| !m.is_dir() && m.permissions().mode() & 0o111 != 0)
     };
-    !path.is_empty() && env::split_paths(&path).any(|dir| executable(dir.join(name)))
+    if path.is_empty() {
+        return None;
+    }
+    env::split_paths(&path).map(|dir| dir.join(name)).find(executable)
 }
 
-/// How the user invokes this CLI: bare `flow` when one is on PATH (the launcher, or the
-/// ~/.local/bin wrapper that runs it), else its path from the repo root: the launcher's
-/// ($FLOW_SELF), else the binary's.
-pub fn flow_cmd(root: &Path) -> String {
-    if on_path("flow") {
-        return "flow".into();
+/// Whether `path` is `me`, or a short script naming it (`exec "$HOME/.../bin/flow"`).
+fn runs_me(path: &Path, me: &Path) -> bool {
+    if resolve(path) == me {
+        return true;
     }
+    let Ok(mut f) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut std::io::Read::take(&mut f, 4096), &mut head);
+    let text = String::from_utf8_lossy(&head);
+    let words = text.split(|c: char| c.is_whitespace() || c == '\'' || c == '"');
+    words.filter_map(|w| w.find("/bin/flow").map(|at| &w[..at + "/bin/flow".len()])).any(|w| {
+        let expanded = expand(w);
+        !expanded.contains('$') && resolve(Path::new(&expanded)) == me
+    })
+}
+
+/// `~` and `$VAR` or `${VAR}` expanded from the environment; unset ones are kept.
+fn expand(word: &str) -> String {
+    let home = env::var("HOME").unwrap_or_default();
+    let word = match word.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+        _ => word.to_string(),
+    };
+    let mut out = String::new();
+    let mut rest = word.as_str();
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let (name, tail) = match after.strip_prefix('{') {
+            Some(b) => match b.find('}') {
+                Some(end) => (&b[..end], &b[end + 1..]),
+                None => ("", after),
+            },
+            None => {
+                let end = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+                after.split_at(end.unwrap_or(after.len()))
+            }
+        };
+        match env::var(name).ok().filter(|_| !name.is_empty()) {
+            Some(v) => out.push_str(&v),
+            None => out.push_str(&rest[at..rest.len() - tail.len()]),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// How the user invokes this CLI: bare `flow` when the `flow` on PATH is this one (the
+/// launcher, or a wrapper like ~/.local/bin/flow that runs it), else its path from the
+/// repo root: the launcher's ($FLOW_SELF), else the binary's.
+pub fn flow_cmd(root: &Path) -> String {
     let me = env::var_os("FLOW_SELF")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(|| env::current_exe().ok())
         .unwrap_or_else(|| "flow".into());
     let me = resolve(&me);
+    if on_path("flow").is_some_and(|found| runs_me(&found, &me)) {
+        return "flow".into();
+    }
     match me.strip_prefix(resolve(root)) {
         Ok(rel) => posix(rel),
         Err(_) => me.display().to_string(),

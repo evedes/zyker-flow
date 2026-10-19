@@ -55,6 +55,11 @@ pub fn find_root(start: &Path) -> Result<Option<PathBuf>> {
     Ok(git_root(start)?.filter(|root| root.join(".flow.json").is_file()))
 }
 
+/// An absolute path as text, `/`-separated.
+fn posix_abs(path: &Path) -> String {
+    path.to_string_lossy().trim_end_matches('/').to_string()
+}
+
 /// `s` in quotes, as flow's messages quote a pattern: single quotes, or double ones when
 /// `s` has a single quote and no double one; backslashes and that quote escaped.
 fn quote(s: &str) -> String {
@@ -145,8 +150,15 @@ impl Repo {
         let Some(fid) = g.active() else {
             return Ok(None);
         };
-        let st = read_json(&self.fdir(fid).join("state.json"))?;
-        Ok(Some((fid.to_string(), st)))
+        let path = self.fdir(fid).join("state.json");
+        if !path.is_file() {
+            let (work, cmd) = (&self.work_rel, flow_cmd(&self.root));
+            bail!(
+                "active feature {fid} has no {work}/{fid}/state.json (removed by `git clean` or \
+                 `git stash`?): restore it, or the user can `! {cmd} abandon` to clear it"
+            );
+        }
+        Ok(Some((fid.to_string(), read_json(&path)?)))
     }
 
     pub fn require_active(&self) -> Result<(String, State)> {
@@ -164,6 +176,25 @@ impl Repo {
         }
         let full = resolve(&self.root.join(path));
         full.strip_prefix(&self.real_root).ok().map(posix)
+    }
+
+    /// A regex for a Bash word naming one of `alts` (repo-relative paths, as regex): as
+    /// written, or after `./`, `$PWD/` or the root's absolute path, and ending there or at
+    /// a `/`. So `/tmp/lib/x` doesn't name `lib/`, nor `src-old` `src`.
+    pub fn names(&self, alts: &str) -> Result<regex::Regex> {
+        let mut roots = BTreeSet::from([posix_abs(&self.root), posix_abs(&self.real_root)]);
+        let home = std::env::var("HOME").ok().filter(|h| h.starts_with('/'));
+        if let Some(home) = home.map(|h| h.trim_end_matches('/').to_string()) {
+            let tilde = roots.iter().filter_map(|r| r.strip_prefix(&home)).map(|r| format!("~{r}"));
+            let tilde: Vec<String> = tilde.filter(|r| r.starts_with("~/")).collect();
+            roots.extend(tilde);
+        }
+        let mut prefixes = vec![r"\./".to_string(), r"\$PWD/".into(), r"\$\{PWD\}/".into()];
+        prefixes.push(r"\$\(pwd\)/".into());
+        prefixes.extend(roots.iter().map(|r| regex::escape(&format!("{r}/"))));
+        let (space, prefix) = (r"\s\x1c-\x1f", prefixes.join("|"));
+        let re = format!(r#"(?:^|[{space}'"=])(?:{prefix})*(?:{alts})(?:[/*?{space}'";&|()<>]|$)"#);
+        Ok(regex::Regex::new(&re)?)
     }
 
     pub fn is_protected(&self, rel: &str) -> bool {
@@ -219,6 +250,12 @@ impl Repo {
             }
         }
         Ok(paths)
+    }
+
+    /// The paths staged for the next commit.
+    pub fn staged_paths(&self) -> Result<Vec<String>> {
+        let out = git(&self.root, &["diff", "--cached", "--name-only", "--no-renames", "-z"])?;
+        Ok(out.split('\0').filter(|p| !p.is_empty()).map(String::from).collect())
     }
 
     /// A feature's tickets/*.md, by name.

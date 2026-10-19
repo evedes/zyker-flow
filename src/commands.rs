@@ -1,13 +1,13 @@
 //! The CLI commands. Each returns the exit code, or an error printed as `flow: ...`.
 
-use crate::checks::check;
+use crate::checks::{check, stale_approvals};
 use crate::config::{
     now, read_json, write_json, Approval, Event, Extra, GateResult, Gates, Phase, State,
 };
 use crate::deploy::{self, exit_code};
 use crate::error::{bail, Error, Result};
 use crate::markdown::{gate_commands, Sections};
-use crate::paths::{file_name, flow_cmd, write};
+use crate::paths::{file_name, flow_cmd, io_error, write};
 use crate::repo::{git, Repo};
 use crate::shell::USER_ONLY;
 use serde_json::{json, Value};
@@ -62,6 +62,14 @@ pub fn new(repo: &Repo, args: &[String]) -> Result<i32> {
         bail!("usage: flow new <slug> [\"<title>\"]");
     };
     let slug = slugify(name);
+    // flow numbers features itself.
+    let slug = match feature_number(&slug) {
+        Some(_) => slug[4..].to_string(),
+        None => slug,
+    };
+    if slug.is_empty() {
+        bail!("slug {name:?} has no letters or digits to name the feature by");
+    }
     let title = args.get(1).cloned().unwrap_or_else(|| {
         let words = slug.replace('-', " ");
         let mut chars = words.chars();
@@ -122,7 +130,7 @@ pub fn status(repo: &Repo) -> Result<i32> {
         let note = if stale { " (stale: code changed since)" } else { "" };
         println!("gates: {result}{note}");
     }
-    let problems = check(repo, &fid, &st)?;
+    let problems = check(repo, &fid, &st, true)?;
     if problems.is_empty() {
         println!("ready: `flow advance`");
     } else {
@@ -134,7 +142,7 @@ pub fn status(repo: &Repo) -> Result<i32> {
 
 pub fn check_cmd(repo: &Repo) -> Result<i32> {
     let (fid, st) = repo.require_active()?;
-    let problems = check(repo, &fid, &st)?;
+    let problems = check(repo, &fid, &st, true)?;
     problems.iter().for_each(|p| println!("- {p}"));
     if !problems.is_empty() {
         return Ok(1);
@@ -145,7 +153,7 @@ pub fn check_cmd(repo: &Repo) -> Result<i32> {
 
 pub fn advance(repo: &Repo) -> Result<i32> {
     let (fid, mut st) = repo.require_active()?;
-    let problems = check(repo, &fid, &st)?;
+    let problems = check(repo, &fid, &st, true)?;
     if !problems.is_empty() {
         bail!("cannot advance from {}:\n{}", st.phase, bullets(&problems));
     }
@@ -154,11 +162,22 @@ pub fn advance(repo: &Repo) -> Result<i32> {
     };
     match next {
         Phase::Spec => scaffold(repo, &fid, &st, "spec.md", None)?,
-        Phase::Tickets => {
+        // Back from a later phase, the tickets are kept.
+        Phase::Tickets if repo.tickets(&fid).is_empty() => {
             let first = repo.fdir(&fid).join("tickets").join("T01.md");
             scaffold(repo, &fid, &st, "ticket.md", Some(first))?;
         }
-        Phase::Review => scaffold(repo, &fid, &st, "review.md", None)?,
+        Phase::Review => {
+            // Each round reviews the code as it is now: an earlier verdict is kept as
+            // review-<n>.md.
+            let review = repo.fdir(&fid).join("review.md");
+            if review.exists() {
+                let kept = (1..).map(|n| repo.fdir(&fid).join(format!("review-{n}.md")));
+                let kept = kept.into_iter().find(|p| !p.exists()).expect("a free name");
+                fs::rename(&review, &kept).map_err(|e| io_error(&review, e))?;
+            }
+            scaffold(repo, &fid, &st, "review.md", None)?;
+        }
         Phase::Ship => st.reviewed_fingerprint = Some(Some(repo.fingerprint()?)),
         _ => {}
     }
@@ -195,8 +214,7 @@ pub fn approve(repo: &Repo, args: &[String]) -> Result<i32> {
     if st.phase != kind {
         bail!("{kind} can only be approved in phase {kind} (now {})", st.phase);
     }
-    let mut problems = check(repo, &fid, &st)?;
-    problems.retain(|p| !p.contains("approval"));
+    let problems = check(repo, &fid, &st, false)?;
     if !problems.is_empty() {
         bail!("{kind} is not complete:\n{}", bullets(&problems));
     }
@@ -211,8 +229,13 @@ pub fn approve(repo: &Repo, args: &[String]) -> Result<i32> {
 
 pub fn gates(repo: &Repo) -> Result<i32> {
     let (fid, mut st) = repo.require_active()?;
-    if !matches!(st.phase, Phase::Build | Phase::Review) {
-        bail!("gates run in build or review (now {})", st.phase);
+    // Not in review: rerunning them there would let code the review never saw reach ship.
+    if st.phase != Phase::Build {
+        bail!("gates run in build (now {})", st.phase);
+    }
+    let stale = stale_approvals(repo, &fid, &st)?;
+    if !stale.is_empty() {
+        bail!("gates run only on the approved spec and tickets:\n{}", bullets(&stale));
     }
     let standing = repo.config.standing_gates.iter();
     let mut cmds: Vec<(String, String)> =
@@ -266,10 +289,19 @@ pub fn pause(repo: &Repo, paused: bool) -> Result<i32> {
 }
 
 pub fn abandon(repo: &Repo) -> Result<i32> {
-    let (fid, mut st) = repo.require_active()?;
-    st.phase = Phase::Abandoned;
-    st.history.push(Event::now(Phase::Abandoned));
-    repo.save_state(&fid, &st)?;
+    let g = repo.load_global()?;
+    let Some(fid) = g.active() else {
+        bail!("no active feature");
+    };
+    // The state is gone if `git clean` removed the feature; the active slot is cleared anyway.
+    let path = repo.fdir(fid).join("state.json");
+    if path.is_file() {
+        let mut st: State = read_json(&path)?;
+        st.phase = Phase::Abandoned;
+        st.history.push(Event::now(Phase::Abandoned));
+        repo.save_state(fid, &st)?;
+    }
+    let fid = fid.to_string();
     repo.set_active(None)?;
     println!("{fid} abandoned");
     Ok(0)
