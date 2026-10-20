@@ -34,6 +34,26 @@ None.
 None.
 ## Acceptance criteria
 Hello is shown.
+## Spec changes
+None.
+## Out of scope
+Goodbyes.
+## Open questions
+None.
+";
+
+/// [`SPEC`] as the template before `## Spec changes` asked for it.
+pub const SPEC_V1: &str = "# Spec: x
+## Goal
+A greeting.
+## Behaviour
+Shows hello.
+## Data model
+None.
+## UI
+None.
+## Acceptance criteria
+Hello is shown.
 ## Out of scope
 Goodbyes.
 ## Open questions
@@ -388,10 +408,15 @@ impl Flow {
     }
 
     pub fn to_build(&self) {
+        self.to_build_with(SPEC);
+    }
+
+    /// Into build with `spec` approved.
+    pub fn to_build_with(&self, spec: &str) {
         self.flow(&["new", "hello", "Hello"]);
         self.fwrite("research.md", RESEARCH);
         self.flow(&["advance"]);
-        self.fwrite("spec.md", SPEC);
+        self.fwrite("spec.md", spec);
         self.flow(&["approve", "spec"]);
         self.flow(&["advance"]);
         self.fwrite("tickets/T01.md", TICKET);
@@ -400,7 +425,12 @@ impl Flow {
     }
 
     pub fn to_ship(&self) {
-        self.to_build();
+        self.to_ship_with(SPEC);
+    }
+
+    /// Into ship with `spec` approved, the code reviewed but not committed.
+    pub fn to_ship_with(&self, spec: &str) {
+        self.to_build_with(spec);
         self.write("lib/app.ex", "hello\n");
         self.flow(&["gates"]);
         self.flow(&["advance"]);

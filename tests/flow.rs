@@ -63,9 +63,23 @@ fn default_templates_decide_the_required_sections() {
     t.flow(&["advance"]);
     t.fwrite("spec.md", &SPEC.replace("## UI\nNone.\n", ""));
     assert_in("'## ui' is missing", &t.flow_any(&["check"]).stdout);
+    t.fwrite("spec.md", &SPEC.replace("## Spec changes\nNone.\n", ""));
+    assert_in("'## spec changes' is missing", &t.flow_any(&["check"]).stdout);
     t.fwrite("spec.md", &SPEC.replace("## Open questions\nNone.\n", ""));
     // only the approval is missing
     assert_in("approve spec", &t.flow_any(&["check"]).stdout);
+}
+
+#[test]
+fn a_heading_in_a_code_fence_is_text() {
+    let t = Flow::new();
+    t.flow(&["new", "hello"]);
+    t.fwrite("research.md", RESEARCH);
+    t.flow(&["advance"]);
+    // The fence holds a `~~~` line, which doesn't close it, and a `## UI` that isn't one.
+    let fenced = "Shows hello:\n  ```md\n~~~\n## UI\nNone.\n  ```\n";
+    t.fwrite("spec.md", &SPEC.replace("## UI\nNone.\n", "").replace("Shows hello.\n", fenced));
+    assert_in("'## ui' is missing", &t.flow_any(&["check"]).stdout);
 }
 
 #[test]
@@ -406,6 +420,91 @@ fn back_to_spec_keeps_the_tickets() {
     assert_eq!(names, ["T01-hello.md"]);
 }
 
+/// [`SPEC`] with `changes` as its `## Spec changes`.
+fn spec_changing(changes: &str) -> String {
+    SPEC.replace("## Spec changes\nNone.\n", &format!("## Spec changes\n{changes}\n"))
+}
+
+#[test]
+fn spec_changes_merge_into_the_living_spec_at_done() {
+    let t = Flow::new();
+    t.write(
+        "work/specs/greeting.md",
+        "# Greeting\n\nWhat the app says.\n\n## Wave\nIt waves.\n\n## Hello\nSays hi.\n\n\
+         ## Shout\nIt shouts.\n",
+    );
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "living spec"]);
+    let changes = "### Changed greeting: hello\nSays hello.\n\n```md\n## not a heading\n```\n\n\
+                   ### Removed greeting: Shout\nToo loud.\n\n\
+                   ### Added farewell: Goodbye\nSays goodbye.\n#### Scenario: leaving\nBye.\n";
+    t.to_ship_with(&spec_changing(changes));
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "hello"]);
+    assert_in("It shouts.", &t.read("work/specs/greeting.md")); // not before done
+    assert!(!t.path("work/specs/farewell.md").exists());
+    let r = t.flow(&["advance"]);
+    assert_in(
+        "merged the spec changes into work/specs/farewell.md, work/specs/greeting.md",
+        &r.stdout,
+    );
+    assert_eq!(
+        t.read("work/specs/greeting.md"),
+        "# Greeting\n\nWhat the app says.\n\n## Wave\n\nIt waves.\n\n## hello\n\nSays hello.\n\n\
+         ```md\n## not a heading\n```\n"
+    );
+    assert_eq!(
+        t.read("work/specs/farewell.md"),
+        "# farewell\n\n## Goodbye\n\nSays goodbye.\n#### Scenario: leaving\nBye.\n"
+    );
+}
+
+#[test]
+fn spec_changes_must_apply_to_the_living_spec() {
+    let t = Flow::new();
+    t.write(
+        "work/specs/greeting.md",
+        "# greeting\n## Hello\nSays hi.\n## Twice\nA.\n## twice\nB.\n",
+    );
+    t.flow(&["new", "hello"]);
+    t.fwrite("research.md", RESEARCH);
+    t.flow(&["advance"]);
+    let check = |changes: &str| {
+        t.fwrite("spec.md", &spec_changing(changes));
+        t.flow_any(&["check"]).stdout
+    };
+    let has_no = "'### Changed greeting: Wave': work/specs/greeting.md has no requirement 'Wave'";
+    assert_in(has_no, &check("### Changed greeting: Wave\nWaves."));
+    assert_in("has no requirement 'Hi'", &check("### Removed other: Hi"));
+    assert_in("work/specs/greeting.md already has it", &check("### Added greeting: HELLO\nHi."));
+    assert_in("has it more than once", &check("### Removed greeting: Twice"));
+    assert_in("text is missing", &check("### Added greeting: Wave"));
+    assert_in("more than one entry", &check("### Added a: X\nx\n### Removed a: x"));
+    assert_in("not `Added|Changed|Removed", &check("### Renamed greeting: Hello"));
+    assert_in("'Greeting' is not an area name", &check("### Added Greeting: Wave\nWaves."));
+    assert_in("no requirement named", &check("### Added greeting:\nWaves."));
+    assert_in("has no `### Added|Changed|Removed", &check("We change the greeting."));
+    assert_in("'## spec changes' is missing", &check("").replace("\n", " "));
+    t.fwrite("spec.md", &spec_changing("### Changed greeting: Wave\nWaves."));
+    assert_in("not complete", &t.flow_any(&["approve", "spec"]).stderr);
+    // Only the approval is missing once they apply.
+    assert_eq!(check("none"), check("### Changed greeting: hello\nSays hello."));
+    assert_in("approve spec", &check("None."));
+}
+
+#[test]
+fn spec_changes_are_checked_again_before_done() {
+    let t = Flow::new();
+    t.write("work/specs/greeting.md", "# greeting\n## Hello\nSays hi.\n");
+    t.to_ship_with(&spec_changing("### Removed greeting: Hello"));
+    t.write("work/specs/greeting.md", "# greeting\n");
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "hello"]);
+    let r = t.flow_any(&["advance"]);
+    assert_in("work/specs/greeting.md has no requirement 'Hello'", &r.stderr);
+    assert_eq!(t.phase(), "ship");
+}
+
 #[test]
 fn approved_artifacts_changed_later_block_gates_and_advance() {
     let t = Flow::new();
@@ -678,7 +777,7 @@ fn state_files_are_pretty_printed_in_a_fixed_key_order() {
   "phase": "spec",
   "approvals": {{
     "spec": {{
-      "hash": "958b176291b35f8a",
+      "hash": "93e3dea9a6bf3616",
       "at": "{approved}"
     }}
   }},
@@ -985,10 +1084,17 @@ fn fingerprint_and_artifact_hashes_are_stable() {
     symlink("../nowhere", t.path("lib/dangling.ex")).unwrap();
     symlink("../work", t.path("lib/dirlink")).unwrap();
 
+    // The spec as features approved it before `## Spec changes`, under the template of then.
+    let template = include_str!("../templates/spec.md");
+    let (before, after) = template.split_once("## Spec changes").unwrap();
+    t.write(
+        "work/templates/spec.md",
+        format!("{before}{}", &after[after.find("## Out").unwrap()..]),
+    );
     t.flow(&["new", "hello", "Hello"]);
     t.fwrite("research.md", RESEARCH);
     t.flow(&["advance"]);
-    t.fwrite("spec.md", SPEC);
+    t.fwrite("spec.md", SPEC_V1);
     t.flow(&["approve", "spec"]);
     t.flow(&["advance"]);
     t.fwrite("tickets/T01.md", TICKET);

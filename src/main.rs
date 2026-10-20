@@ -28,6 +28,7 @@ mod markdown;
 mod paths;
 mod repo;
 mod shell;
+mod specs;
 
 use error::{Error, Result};
 use std::env;

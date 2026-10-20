@@ -10,6 +10,7 @@ use crate::markdown::{gate_commands, Sections};
 use crate::paths::{file_name, flow_cmd, io_error, write};
 use crate::repo::{git, Repo};
 use crate::shell::USER_ONLY;
+use crate::specs;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -179,6 +180,16 @@ pub fn advance(repo: &Repo) -> Result<i32> {
             scaffold(repo, &fid, &st, "review.md", None)?;
         }
         Phase::Ship => st.reviewed_fingerprint = Some(Some(repo.fingerprint()?)),
+        Phase::Done => {
+            let merge = specs::merge(repo, &fid)?;
+            if !merge.problems.is_empty() {
+                bail!("cannot merge the spec changes:\n{}", bullets(&merge.problems));
+            }
+            let written = specs::apply(repo, merge)?;
+            if !written.is_empty() {
+                println!("merged the spec changes into {}", written.join(", "));
+            }
+        }
         _ => {}
     }
     st.phase = next;

@@ -20,6 +20,7 @@ nothing.
 | Every move into review starts a fresh `review.md`, and gates run only in build, so a verdict only covers the code it was written for | CLI |
 | No `git push` while a CI/deploy run is in flight | hook on `git push` (the `deploy` provider) |
 | Spec and tickets need the user's approval; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again | CLI |
+| The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply | CLI |
 | A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
 | The agent can't run `approve`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
 
@@ -191,7 +192,9 @@ for the record; nothing checks it) are substituted when scaffolding. The CLI
 reads a few sections by name, so overrides should keep them: `## Open
 questions` (research and spec; unticked `- [ ]` items block advancing),
 `## Verification steps` (tickets; the commands in its ``` block, one per line,
-`#` lines skipped) and `## Verdict` (review; must start with `pass`).
+`#` lines skipped), `## Spec changes` (spec; see [The living
+spec](#the-living-spec)) and `## Verdict` (review; must start with `pass`). A
+`## ` line inside a code fence (``` or ~~~) is text, not a heading.
 
 Phase artifacts are scaffolded on entry: `research.md` by `flow new`,
 `spec.md`, `tickets/T01.md` (unless `tickets/` already holds tickets) and
@@ -199,6 +202,42 @@ Phase artifacts are scaffolded on entry: `research.md` by `flow new`,
 for further tickets. Each `flow advance` into review renames an existing
 `review.md` to `review-<n>.md` and scaffolds a fresh one, so coming back to
 review after a code change always needs a new verdict.
+
+## The living spec
+
+`<work_dir>/specs/<area>.md` says how the system behaves now: one file per
+area (lowercase letters, digits, `-` and `_`), one `## <requirement>` section
+per requirement, and any text before the first one (a title, an intro) kept as
+it is. Each feature says what it changes in it under `## Spec changes` in
+`spec.md`, so the spec approval covers it:
+
+```markdown
+## Spec changes
+### Added auth: Password reset
+A user who forgot their password can ...
+
+### Changed auth: Login
+The full new text of the requirement.
+
+### Removed billing: Legacy invoices
+```
+
+Added and Changed carry the requirement's whole text (`####` headings, such as
+scenarios, included); Removed needs none, and anything below it is dropped.
+Renaming a requirement is a Removed and an Added. Names match whatever their
+case and spacing; a Changed entry renames to its own spelling. With nothing to
+change, the section says `None.`.
+
+`flow check` in spec, and again in ship, refuses spec changes that would not
+apply: an Added requirement the area already has, a Changed or Removed one it
+lacks (or has twice), two entries for one requirement, a heading of another
+shape, or text with no entries. ship→done merges them: Changed in place, Added
+at the end of its area (a new area file starts with `# <area>`), Removed taken
+out, and the touched files rewritten with blank lines between headings and
+bodies. They land in the commit that done already needs for `state.json`.
+
+Nothing writes the living spec before done, so a repo starts it by hand,
+outside any feature (from the specs of features already done, say).
 
 ## Files
 
@@ -208,6 +247,7 @@ Per repo:
 - `<work_dir>/STANDING.md`: the standing Definition of Ready/Done every ticket
   inherits.
 - `<work_dir>/templates/` (optional): template overrides.
+- `<work_dir>/specs/<area>.md`: the living spec (see [The living spec](#the-living-spec)).
 - `<work_dir>/flow.json` (active feature, paused flag) and
   `<work_dir>/<NNN-slug>/`: `state.json`, `research.md`, `spec.md`,
   `tickets/T01-*.md`, `review.md` (earlier rounds as `review-<n>.md`).
@@ -216,8 +256,9 @@ Per repo:
   flow rewrites the two state files pretty-printed (non-ASCII as UTF-8),
   keeping keys it doesn't know; a known key of the wrong type, or an unknown
   phase, fails every command and hook.
-  `flow advance` to done changes `state.json` after the ship commit, so commit
-  the work dir once more afterwards.
+  `flow advance` to done changes `state.json`, and merges the spec changes into
+  `<work_dir>/specs/`, after the ship commit, so commit the work dir once more
+  afterwards.
 
 In the plugin:
 
@@ -226,7 +267,7 @@ In the plugin:
 | `.claude-plugin/plugin.json` | plugin manifest (`flow`; no `version`, see `AGENTS.md`) |
 | `.claude-plugin/marketplace.json` | the one-plugin marketplace `zyker-flow` (`source: "."`) |
 | `bin/flow` | the launcher (POSIX sh): finds or fetches the flow binary and runs it (see [The flow binary](#the-flow-binary)) |
-| `src/`, `Cargo.toml`, `Cargo.lock` | the CLI and both hooks, in Rust (one binary, `flow`; `templates/` are compiled in): `main.rs` dispatches, `commands.rs` and `hooks.rs` are the entry points, `checks.rs` what each phase needs, `shell.rs` reads Bash commands, `markdown.rs` the artifacts, `config.rs` the JSON files, `repo.rs` the repo and its fingerprints, `deploy.rs` CI runs and the health check, `paths.rs` and `error.rs` the rest |
+| `src/`, `Cargo.toml`, `Cargo.lock` | the CLI and both hooks, in Rust (one binary, `flow`; `templates/` are compiled in): `main.rs` dispatches, `commands.rs` and `hooks.rs` are the entry points, `checks.rs` what each phase needs, `shell.rs` reads Bash commands, `markdown.rs` the artifacts, `specs.rs` the living spec, `config.rs` the JSON files, `repo.rs` the repo and its fingerprints, `deploy.rs` CI runs and the health check, `paths.rs` and `error.rs` the rest |
 | `rustfmt.toml` | `cargo fmt` settings |
 | `.github/workflows/` | `ci.yml` (fmt, clippy and every test suite on Linux and macOS; the release pin on main) and `release.yml` (the four release binaries) |
 | `VERSION`, `SHA256SUMS` | the release bin/flow runs, and its pinned checksums (see [Releasing](#releasing)) |
@@ -363,7 +404,11 @@ first release is pinned, bin/flow builds flow from source everywhere.
 Open defects, found in the 2026-10-18 review; each needs a fix and a test.
 
 - `.flow.json`, `<work_dir>/templates/` and `STANDING.md` are not protected:
-  the agent can edit them in any phase, changing the rules mid-feature.
+  the agent can edit them in any phase, changing the rules mid-feature. Nor is
+  `<work_dir>/specs/`: the living spec can change outside a feature's approved
+  spec changes.
+- flow does not commit the living spec's merge at done, and nothing checks
+  that it was committed.
 - `flow gates` fingerprints the tree after the commands run, so a gate that
   rewrites code (an unchecked formatter, a generator) passes on code it never
   checked.
@@ -380,7 +425,6 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
   active feature, or, when a tracked `<work_dir>/flow.json` survives, that the
   active feature's state is missing, and denies code edits until it is restored
   or the user runs `flow abandon`.
-- A `## ` line inside a fenced block is read as a section heading.
 
 Of the binary and its launcher:
 

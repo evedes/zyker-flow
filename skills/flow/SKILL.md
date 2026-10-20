@@ -54,13 +54,22 @@ has them, else the plugin's. `TODO(flow)` marks unfilled template text;
 `flow check` fails while any remain, or while a section the template seeded
 with one is missing or empty.
 
-1. **explore** — fill `research.md`. Read the code before proposing anything;
+1. **explore** — fill `research.md`. Read the living spec (`<work>/specs/*.md`,
+   how the system behaves now, one `## <requirement>` per requirement) and the
+   code before proposing anything;
    use a subagent (Explore) for wide reading so findings come back distilled.
    Put decisions only the user can make under `## Open questions` as `- [ ]`
    items, then stop and ask. Tick them (`- [x]`) with the answer once given.
 2. **spec** — fill `spec.md`: the user-visible behaviour, data model, UI and
-   testable acceptance criteria, plus what is out of scope. Present it and ask
-   for `! flow approve spec`. Changing `spec.md` afterwards voids the approval.
+   testable acceptance criteria, plus what is out of scope. Under
+   `## Spec changes`, say what it changes in the living spec: a
+   `### Added <area>: <requirement>` or `### Changed <area>: <requirement>`
+   entry with the requirement's full new text below it, or
+   `### Removed <area>: <requirement>`, for each, or `None.`. `flow check`
+   refuses entries that don't apply (an Added one the area has, a Changed or
+   Removed one it lacks); flow merges them at done, so never edit
+   `<work>/specs/` yourself during a feature. Present the spec and ask for
+   `! flow approve spec`. Changing `spec.md` afterwards voids the approval.
 3. **tickets** — split the spec into `tickets/T01-<slug>.md`, `T02-…`:
    `flow advance` scaffolds `tickets/T01.md`; rename it and copy it for each
    further ticket. Every field the standing agreement (`<work>/STANDING.md`)
@@ -87,8 +96,9 @@ with one is missing or empty.
    section in `.flow.json`, push too: the push hook refuses while a CI/deploy
    run is in flight. Watch with `flow deploy`; `flow advance` to **done** once
    CI is green for HEAD and the health check returns 200. Without one, ship
-   ends once everything is committed. Moving to done rewrites `state.json`, so
-   commit the `<work>` folder once more afterwards.
+   ends once everything is committed. Moving to done rewrites `state.json` and
+   merges the spec changes into `<work>/specs/`, so commit the `<work>` folder
+   once more afterwards.
 
 Work that touches no protected path (docs, CI, tooling) needs no feature. To
 commit it mid-feature, stage it and run a plain `git commit -m '<message>'`

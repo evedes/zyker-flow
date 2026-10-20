@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::markdown::{check_doc, gate_commands, unchecked_boxes, Doc};
 use crate::paths::{file_name, flow_cmd};
 use crate::repo::{git, Repo};
+use crate::specs;
 use regex::Regex;
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -45,6 +46,9 @@ pub fn check(repo: &Repo, fid: &str, st: &State, own_approval: bool) -> Result<V
             problems.extend(check_doc(doc.as_ref(), &required, name));
             let open = doc.map(|doc| unchecked_boxes(&doc.sections, "open questions", name));
             problems.extend(open.flatten());
+            if spec {
+                problems.extend(specs::merge(repo, fid)?.problems);
+            }
             let need = spec && own_approval && problems.is_empty();
             if need && !repo.approval_valid(fid, st, Phase::Spec)? {
                 problems.push(approval("spec.md needs", Phase::Spec));
@@ -104,6 +108,8 @@ fn ship_problems(repo: &Repo, fid: &str) -> Result<Vec<String>> {
         let shown = dirty[..dirty.len().min(5)].join(", ");
         problems.push(format!("uncommitted changes: {shown}"));
     }
+    // The living spec may have been edited since the spec was approved.
+    problems.extend(specs::merge(repo, fid)?.problems);
     let Some(deploy) = &repo.config.deploy else {
         return Ok(problems);
     };

@@ -13,22 +13,43 @@ static UNCHECKED_BOX: LazyLock<Regex> = regex!(r"(?m)^[\s\x1c-\x1f]*[-*][\s\x1c-
 
 /// A document's lines. Besides \n, \v, \f, \x1c-\x1e, NEL and U+2028/2029 end a line;
 /// the separators \x1c-\x1f count as whitespace ([`is_space`]).
-fn lines(text: &str) -> impl Iterator<Item = &str> {
+pub fn lines(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c| {
         matches!(c, '\n' | '\x0b' | '\x0c' | '\x1c'..='\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}')
     })
 }
 
+/// Whether lines are inside a fenced code block: one opened by ``` or ~~~ and closed by
+/// the same, its own fence lines included.
+#[derive(Default)]
+pub struct Fences(Option<char>);
+
+impl Fences {
+    pub fn code(&mut self, line: &str) -> bool {
+        let start = line.trim_start_matches(is_space);
+        let fence = ['`', '~'].into_iter().find(|&c| start.chars().take(3).all(|s| s == c));
+        let fence = fence.filter(|_| start.len() >= 3);
+        match (self.0, fence) {
+            (None, Some(c)) => self.0 = Some(c),
+            (Some(open), Some(c)) if open == c => self.0 = None,
+            (open, _) => return open.is_some(),
+        }
+        true
+    }
+}
+
 /// A document's `## ` sections in order: lowercased heading, trimmed body. A repeated
-/// heading keeps its first place and its last body.
+/// heading keeps its first place and its last body. A `## ` line in a code fence is text.
 pub struct Sections(Vec<(String, String)>);
 
 impl Sections {
     pub fn parse(text: &str) -> Sections {
         let mut out: Vec<(String, Vec<&str>)> = Vec::new();
         let mut cur: Option<usize> = None;
+        let mut fences = Fences::default();
         for line in lines(text) {
-            let Some(key) = heading(line) else {
+            let code = fences.code(line);
+            let Some(key) = heading(line).filter(|_| !code) else {
                 if let Some(i) = cur {
                     out[i].1.push(line);
                 }

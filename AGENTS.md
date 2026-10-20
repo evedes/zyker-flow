@@ -42,6 +42,7 @@ known limitations. `CLAUDE.md` is a symlink to this file.
   unbumped version string. `VERSION` is the flow binary's release, not the
   plugin's version.
 - The user's `~/.local/bin/flow` wrapper execs this checkout's `bin/flow`.
-- Repos using it (the ones `scripts/smoke` finds): atomize (`~/Work/atomize`).
+- Repos using it (the ones `scripts/smoke` finds): atomize, zyker and zyker-cloud
+  (`~/Work/atomize`, `~/Work/zyker`, `~/Work/zyker-cloud`).
 - When a behaviour changes, update `README.md` and `skills/flow/SKILL.md` in
   the same commit: the skill is what the agent reads in every flow repo.
