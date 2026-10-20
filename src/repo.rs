@@ -196,6 +196,16 @@ impl Repo {
         r == "flow.json" || id.is_some_and(|id| !id.is_empty() && !id.contains('/'))
     }
 
+    /// .flow.json, <work_dir>/STANDING.md, <work_dir>/templates/ and <work_dir>/specs/: what
+    /// a feature is judged by.
+    pub fn is_rule_file(&self, rel: &str) -> bool {
+        let work = |p: &str| format!("{}/{p}", self.work_rel);
+        rel == ".flow.json"
+            || rel == work("STANDING.md")
+            || under(rel, &work("templates"))
+            || under(rel, &work("specs"))
+    }
+
     /// A content fingerprint of everything git would see, minus the work dir: each path,
     /// then its content, a symlink's target or `<deleted>`.
     pub fn fingerprint(&self) -> Result<String> {
@@ -275,9 +285,18 @@ impl Repo {
         Ok(Some(hex16(&h.finalize())))
     }
 
+    /// What an approval of `kind` is bound to: its artifact's hash, or for review the
+    /// code's fingerprint.
+    pub fn gate_hash(&self, fid: &str, kind: Phase) -> Result<Option<String>> {
+        match kind {
+            Phase::Review => Ok(Some(self.fingerprint()?)),
+            _ => self.artifact_hash(fid, kind),
+        }
+    }
+
     pub fn approval_valid(&self, fid: &str, st: &State, kind: Phase) -> Result<bool> {
         match st.approval(kind) {
-            Some(a) => Ok(a.hash == self.artifact_hash(fid, kind)?),
+            Some(a) => Ok(a.hash == self.gate_hash(fid, kind)?),
             None => Ok(false),
         }
     }

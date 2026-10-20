@@ -506,6 +506,220 @@ fn spec_changes_are_checked_again_before_done() {
 }
 
 #[test]
+fn rules_change_only_by_hand_while_a_feature_is_active() {
+    let t = Flow::new();
+    t.write("work/specs/greeting.md", "# greeting\n");
+    for rule in [".flow.json", "work/STANDING.md", "work/templates/spec.md", "work/specs/x.md"] {
+        assert_eq!(t.edit(rule), None, "{rule} with no feature active");
+    }
+    t.flow(&["new", "hello"]);
+    for rule in [".flow.json", "work/STANDING.md", "work/templates/spec.md", "work/specs/x.md"] {
+        assert_in("change only by hand", &denied(t.edit(rule)));
+    }
+    assert_in("change only by hand", &denied(t.bash("echo '{}' > .flow.json")));
+    assert_in("change only by hand", &denied(t.bash("rm -r work/specs")));
+    assert_in("change only by hand", &denied(t.bash("sed -i s/a/b/ work/STANDING.md")));
+    assert_eq!(t.bash("cat .flow.json work/specs/greeting.md"), None);
+    assert_eq!(t.edit("work/001-hello/research.md"), None);
+    t.flow(&["pause"]);
+    assert_in("change only by hand", &denied(t.edit(".flow.json")));
+}
+
+/// A `claude` on PATH that records its arguments and prompt and replies with `verdict`.
+struct Judge {
+    dir: TempDir,
+}
+
+impl Judge {
+    fn new(t: &mut Flow) -> Judge {
+        let dir = TempDir::new();
+        let claude = dir.path().join("claude");
+        write(
+            &claude,
+            "#!/bin/sh\necho \"$@\" > \"$0.args\"\ncat > \"$0.prompt\"\ncat \"$0.json\"\n",
+        );
+        chmod_x(&claude);
+        t.set_env("PATH", path_with(dir.path()));
+        let judge = Judge { dir };
+        judge.says("approve", "Looks right.", &[]);
+        judge
+    }
+
+    fn says(&self, verdict: &str, summary: &str, findings: &[&str]) {
+        let output = json!({
+            "verdict": verdict, "summary": summary, "findings": findings,
+            "questions": if verdict == "ask-user" { json!(["Blue or green?"]) } else { json!([]) },
+        });
+        let reply = json!({"type": "result", "subtype": "success", "is_error": false,
+                           "result": output.to_string(), "structured_output": output});
+        write(&self.dir.path().join("claude.json"), reply.to_string());
+    }
+
+    fn replies(&self, reply: &str) {
+        write(&self.dir.path().join("claude.json"), reply);
+    }
+
+    fn file(&self, ext: &str) -> String {
+        let path = self.dir.path().join(format!("claude.{ext}"));
+        let text = if path.exists() { read(&path) } else { String::new() };
+        let _ = fs::remove_file(path);
+        text
+    }
+}
+
+/// Into phase spec, the spec complete but not approved.
+fn at_spec(t: &Flow) {
+    t.flow(&["new", "hello", "Hello"]);
+    t.fwrite("research.md", RESEARCH);
+    t.flow(&["advance"]);
+    t.fwrite("spec.md", SPEC);
+}
+
+#[test]
+fn the_judge_passes_only_what_the_user_delegated() {
+    let mut t = Flow::new();
+    let judge = Judge::new(&mut t);
+    at_spec(&t);
+    assert_in("has not delegated spec", &t.flow_any(&["judge"]).stderr);
+    assert_eq!(judge.file("args"), ""); // never ran
+    assert_in("are the user's", &denied(t.bash("flow delegate spec")));
+    assert_in("usage: flow delegate", &t.flow_any(&["delegate", "build"]).stderr);
+    t.flow(&["delegate", "spec"]);
+    assert_in("or the judge's: `", &t.flow_any(&["check"]).stdout);
+    assert_in("delegated to the judge: spec", &t.flow(&["status"]).stdout);
+    let r = t.flow(&["judge"]);
+    assert_in("judge: approve — Looks right.", &r.stdout);
+    let args = judge.file("args");
+    assert_in("-p --output-format json --no-session-persistence", &args);
+    assert_in("--tools Read,Grep,Glob --allowedTools Read,Grep,Glob --json-schema", &args);
+    let prompt = judge.file("prompt");
+    assert_in("delegated to you their approval of its spec", &prompt);
+    assert_in("<artifact path=\"work/001-hello/spec.md\">\n# Spec: x", &prompt);
+    assert_in("<artifact path=\"work/001-hello/research.md\">", &prompt);
+    assert_in("Judge the spec (spec.md)", &prompt);
+    assert!(!prompt.contains("Judge the tickets"), "{prompt}");
+    assert_eq!(t.state()["approvals"]["spec"]["by"], "judge");
+    assert_in("approval spec: valid (by the judge)", &t.flow(&["status"]).stdout);
+    t.flow(&["advance"]);
+    // Tickets weren't delegated, and an edit voids the judge's approval like the user's.
+    t.fwrite("tickets/T01.md", TICKET);
+    assert_in("has not delegated tickets", &t.flow_any(&["judge"]).stderr);
+    t.flow(&["back"]);
+    t.fwrite("spec.md", &format!("{SPEC}\nchanged\n"));
+    assert_in("approve spec", &t.flow_any(&["check"]).stdout);
+    t.flow(&["delegate", "off"]);
+    assert_in("has not delegated spec", &t.flow_any(&["judge"]).stderr);
+}
+
+#[test]
+fn a_rejection_is_kept_per_version_and_hands_back_after_three() {
+    let mut t = Flow::new();
+    let judge = Judge::new(&mut t);
+    at_spec(&t);
+    t.flow(&["delegate", "spec"]);
+    judge.says("reject", "Thin.", &["spec.md Behaviour: no error states"]);
+    let r = t.flow_any(&["judge"]);
+    assert_eq!(r.code, 1);
+    assert_in("judge: reject — Thin.\n  - spec.md Behaviour: no error states", &r.stdout);
+    assert!(t.state()["approvals"]["spec"].is_null());
+    judge.file("args");
+    // The same version again: the same verdict, without asking the judge.
+    judge.says("approve", "Fine now.", &[]);
+    assert_in("judged this version of spec already", &t.flow_any(&["judge"]).stdout);
+    assert_eq!(judge.file("args"), "");
+    for n in 2..=3 {
+        judge.says("reject", "Still thin.", &[]);
+        t.fwrite("spec.md", &format!("{SPEC}\nround {n}\n"));
+        assert_eq!(t.flow_any(&["judge"]).code, 1);
+    }
+    t.fwrite("spec.md", SPEC.replace("Shows hello.", "Shows hello, or an error.").as_str());
+    let r = t.flow_any(&["judge"]);
+    assert_in("rejected spec 3 times since it was delegated", &r.stderr);
+    t.flow(&["delegate", "spec"]); // three more tries
+    judge.says("approve", "Fine now.", &[]);
+    t.flow(&["judge"]);
+    assert_eq!(t.state()["judgements"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn the_judge_asks_the_user_and_fails_closed() {
+    let mut t = Flow::new();
+    let judge = Judge::new(&mut t);
+    at_spec(&t);
+    t.flow(&["delegate", "spec"]);
+    judge.says("ask-user", "A product call.", &[]);
+    let r = t.flow_any(&["judge"]);
+    assert_eq!(r.code, 1);
+    assert_in("questions for the user:\n  - Blue or green?", &r.stdout);
+    t.fwrite("spec.md", &format!("{SPEC}\nv2\n"));
+    let failed =
+        r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"result":"over"}"#;
+    judge.replies(failed);
+    assert_in("the judge failed (error_max_budget_usd)", &t.flow_any(&["judge"]).stderr);
+    judge.replies("not json");
+    assert_in("the judge's reply is not JSON", &t.flow_any(&["judge"]).stderr);
+    judge.replies(r#"{"is_error":false,"structured_output":{"verdict":"yes","summary":""}}"#);
+    assert_in("\"yes\" is not one of approve, reject, ask-user", &t.flow_any(&["judge"]).stderr);
+    assert_eq!(t.state()["judgements"].as_array().unwrap().len(), 1);
+    assert!(t.state()["approvals"]["spec"].is_null());
+    t.fwrite("spec.md", &SPEC.replace("Goodbyes.", "TODO(flow): later"));
+    assert_in("spec is not ready to judge", &t.flow_any(&["judge"]).stderr);
+}
+
+#[test]
+fn a_delegated_review_needs_the_judge_not_review_md() {
+    let mut t = Flow::new();
+    let judge = Judge::new(&mut t);
+    t.write("work/STANDING.md", "# Standing\n");
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    t.flow(&["gates"]);
+    t.flow(&["delegate", "review"]);
+    t.flow(&["advance"]);
+    t.fwrite("review.md", REVIEW); // the agent's own pass doesn't count
+    assert_in("review needs the user's approval", &t.flow_any(&["advance"]).stderr);
+    judge.says("reject", "No test for hello.", &["lib/app.ex:1 untested"]);
+    assert_eq!(t.flow_any(&["judge"]).code, 1);
+    assert_in("## Verdict\nfail — No test for hello.", &t.fread("review.md"));
+    let prompt = judge.file("prompt");
+    assert_in("[standing] true => exit 0", &prompt);
+    assert_in("<artifact path=\"git diff HEAD\">", &prompt);
+    assert_in("lib/app.ex", &prompt); // a new file
+    assert_in("<rules path=\"work/STANDING.md\">", &prompt);
+    assert_in("<artifact path=\"work/001-hello/tickets/T01.md\">", &prompt);
+    t.flow(&["back"]);
+    t.write("lib/app_test.ex", "test\n");
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    judge.says("approve", "Tested now.", &[]);
+    t.flow(&["judge"]);
+    assert_in("## Verdict\npass — Tested now.", &t.fread("review.md"));
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "ship");
+}
+
+#[test]
+fn the_user_can_approve_the_review() {
+    let t = Flow::new();
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    t.flow(&["gates"]);
+    assert_in(
+        "review can only be approved in phase review",
+        &t.flow_any(&["approve", "review"]).stderr,
+    );
+    t.flow(&["advance"]);
+    assert_in("review.md", &t.flow_any(&["check"]).stdout); // review.md not filled in
+    t.flow(&["approve", "review"]);
+    t.flow(&["check"]);
+    t.flow(&["back"]);
+    t.write("lib/app.ex", "changed\n");
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    assert_in("review.md", &t.flow_any(&["check"]).stdout); // that approval was of other code
+}
+
+#[test]
 fn approved_artifacts_changed_later_block_gates_and_advance() {
     let t = Flow::new();
     t.to_build();
@@ -669,7 +883,7 @@ fn assert_key_order(text: &str, keys: &[&str]) {
 }
 
 const DOC: &str = "flow — a phase-gated feature workflow for Claude Code.\n\n\
-commands: init, new, status, check, advance, back, approve, gates, deploy, pause, resume, abandon\n";
+commands: init, new, status, check, advance, back, approve, delegate, judge, gates, deploy, pause, resume, abandon\n";
 
 #[test]
 fn help_and_usage_errors() {
@@ -693,7 +907,7 @@ fn help_and_usage_errors() {
     assert_eq!(err(&t, &["new"]), new_usage);
     assert_eq!(err(&t, &["deploy"]), usage("no deploy config in .flow.json"));
     t.flow(&["new", "hello"]);
-    let approve_usage = usage("usage: flow approve spec|tickets");
+    let approve_usage = usage("usage: flow approve spec|tickets|review");
     assert_eq!(err(&t, &["approve"]), approve_usage);
     assert_eq!(err(&t, &["approve", "spec", "tickets"]), approve_usage);
     assert_eq!(
@@ -941,6 +1155,7 @@ fn init_writes_settings_and_config_json() {
     let mut want = parse(settings);
     want["permissions"]["deny"] = json!([
         "Bash(flow approve:*)",
+        "Bash(flow delegate:*)",
         "Bash(flow pause:*)",
         "Bash(flow resume:*)",
         "Bash(flow abandon:*)",
@@ -1002,7 +1217,8 @@ fn init_writes_settings_and_config_json() {
     assert_eq!(
         u.read(".claude/settings.json"),
         "{\n  \"permissions\": {\n    \"deny\": [\n      \"Bash(flow approve:*)\",\n      \
-         \"Bash(flow pause:*)\",\n      \"Bash(flow resume:*)\",\n      \"Bash(flow abandon:*)\",\n      \
+         \"Bash(flow delegate:*)\",\n      \"Bash(flow pause:*)\",\n      \
+         \"Bash(flow resume:*)\",\n      \"Bash(flow abandon:*)\",\n      \
          \"Edit(work/flow.json)\",\n      \"Edit(work/*/state.json)\"\n    ]\n  }\n}\n"
     );
 }
@@ -1240,7 +1456,7 @@ fn bash_edge_cases() {
     let state = "flow: state files are written only by the flow CLI";
     let commit = "flow: commit touches code (lib/x.ex) but 001-hello is in phase explore; \
                   code is committed only in ship";
-    let user = "flow: approve/pause/resume/abandon are the user's: they run them as `! ";
+    let user = "flow: approve/delegate/pause/resume/abandon are the user's: they run them as `! ";
     let wrong: Vec<String> = cases
         .into_iter()
         .filter_map(|(c, want)| {
@@ -1402,7 +1618,7 @@ fn flow_self_names_the_cli_when_flow_is_not_on_path() {
     );
     assert_eq!(
         denied(t.bash("flow approve spec")),
-        "flow: approve/pause/resume/abandon are the user's: they run them as `! tools/flow ...`"
+        "flow: approve/delegate/pause/resume/abandon are the user's: they run them as `! tools/flow ...`"
     );
 
     // Outside it: the absolute path, symlinks resolved.

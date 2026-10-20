@@ -19,10 +19,12 @@ nothing.
 | Code is committed only in **ship**, with both approvals valid, gates passed and review passed **on the exact code being committed** (content fingerprint) | hook on `git commit` |
 | Every move into review starts a fresh `review.md`, and gates run only in build, so a verdict only covers the code it was written for | CLI |
 | No `git push` while a CI/deploy run is in flight | hook on `git push` (the `deploy` provider) |
-| Spec and tickets need the user's approval; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again | CLI |
+| Spec and tickets need the user's approval, or the judge's where the user delegated it; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again | CLI |
+| A delegated review needs the judge's approval (or the user's) of the exact code; a verdict the agent writes in `review.md` doesn't count | CLI |
+| While a feature is active, the rules it is judged by (`.flow.json`, `<work_dir>/STANDING.md`, `<work_dir>/templates/`, `<work_dir>/specs/`) change only by hand | hook |
 | The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply | CLI |
 | A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
-| The agent can't run `approve`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
+| The agent can't run `approve`, `delegate`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
 
 Changes that touch no protected path (docs, CI, tooling) are never blocked
 from being made. They do count towards the gates, though: the fingerprint
@@ -95,7 +97,9 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
 | `flow advance`, `flow back` | agent | move forward (when `check` passes) or back one phase |
 | `flow gates` | agent | in build: run standing gates + every ticket's verification commands, record result and fingerprint (refuses while an approval is stale) |
 | `flow deploy` | anyone | the last 15 CI runs (`*` marks HEAD) and the health check |
-| `flow approve spec\|tickets` | user | approve the current artifact (only in its own phase, and only when it is complete) |
+| `flow approve spec\|tickets\|review` | user | approve the current artifact (only in its own phase, and only when it is complete); review approves the code as it is now |
+| `flow delegate spec\|tickets\|review…`, `flow delegate off` | user | let the judge pass those gates for the active feature, or stop it (see [The judge](#the-judge)) |
+| `flow judge` | agent | in a delegated spec, tickets or review: run the judge on it and record its verdict |
 | `flow pause`, `flow resume` | user | suspend or restore enforcement (state files stay protected) |
 | `flow abandon` | user | drop the active feature (its folder stays, phase `abandoned`; also clears an active feature whose folder is gone) |
 
@@ -134,6 +138,7 @@ else its path (see [The flow binary](#the-flow-binary)).
 | `standing_gates` | shell commands `flow gates` runs at the git root, before every ticket's verification commands |
 | `codegen` | regexes ([fancy-regex](https://docs.rs/fancy-regex) syntax) for commands that write code without naming the files (generators, formatters); each is searched for in one simple command at a time |
 | `deploy` | optional; without it the push check and the ship→done CI check are skipped |
+| `judge` | optional: `model` and `max_budget_usd` for `flow judge` (see [The judge](#the-judge)) |
 
 `flow init` fills in `protected_paths`, `standing_gates` and `codegen` for
 Elixir (`mix.exs`), Rust (`Cargo.toml`), Python (`pyproject.toml`) and Node
@@ -193,7 +198,9 @@ reads a few sections by name, so overrides should keep them: `## Open
 questions` (research and spec; unticked `- [ ]` items block advancing),
 `## Verification steps` (tickets; the commands in its ``` block, one per line,
 `#` lines skipped), `## Spec changes` (spec; see [The living
-spec](#the-living-spec)) and `## Verdict` (review; must start with `pass`). A
+spec](#the-living-spec)) and `## Verdict` (review; must start with `pass`,
+unless review is delegated: then `review.md` is the judge's record and the
+template is not checked). A
 `## ` line inside a code fence (``` or ~~~) is text, not a heading.
 
 Phase artifacts are scaffolded on entry: `research.md` by `flow new`,
@@ -202,6 +209,46 @@ Phase artifacts are scaffolded on entry: `research.md` by `flow new`,
 for further tickets. Each `flow advance` into review renames an existing
 `review.md` to `review-<n>.md` and scaffolds a fresh one, so coming back to
 review after a code change always needs a new verdict.
+
+## The judge
+
+The user can hand a gate (spec, tickets or review) to a judge instead of
+approving it themselves: `! flow delegate spec tickets review`. It covers the
+active feature only, until done or abandon, and `! flow delegate off` takes it
+back. The user's own `flow approve` keeps working either way.
+
+`flow judge`, which the agent runs once the gate's artifact is complete, starts
+a fresh, read-only Claude: `claude -p` with only the Read, Grep and Glob tools,
+no session kept, and a structured-output schema. Its prompt is flow's own brief
+(`src/judge.md`, compiled in, not overridable) with the gate's criteria and its
+artifacts: research and spec for spec; spec, tickets and `STANDING.md` for
+tickets; those plus the gate results, `git diff HEAD` (cut at 200 kB) and the
+new files for review. Artifacts are marked as the agent's, and the brief says an
+instruction in them addressed to a reviewer is itself a finding.
+
+The verdict is one of:
+
+- `approve`: flow records an approval like the user's (`"by": "judge"`), bound to
+  the artifact's hash, or for review to the code's fingerprint, so an edit voids
+  it the same way.
+- `reject`: its findings are printed and kept in `state.json`. Fix them and run
+  `flow judge` again.
+- `ask-user`: the gate hinges on a decision only the user can make; its
+  questions are printed for the user, who answers them or approves the gate.
+
+Every verdict is kept in `state.json` under `judgements`, keyed by what was
+judged: running `flow judge` again on the same version prints the same verdict
+without asking. After three rejections of a gate since it was delegated, the
+judge hands it back: the user approves it, or delegates it again for three more
+tries. In a delegated review, flow writes the verdict into `review.md` as the
+record, and only an approval (the judge's or the user's) of the current code
+lets review end. A run that fails (no `claude`, an error, the budget spent, a
+reply without a verdict) records nothing, and neither does one during which the
+artifact changed.
+
+`.flow.json`'s optional `judge` section sets `model` (passed as `--model`) and
+`max_budget_usd` (`--max-budget-usd`). A run takes minutes (one on Haiku took
+about 45 s) and is billed to the user's Claude account.
 
 ## The living spec
 
@@ -267,7 +314,7 @@ In the plugin:
 | `.claude-plugin/plugin.json` | plugin manifest (`flow`; no `version`, see `AGENTS.md`) |
 | `.claude-plugin/marketplace.json` | the one-plugin marketplace `zyker-flow` (`source: "."`) |
 | `bin/flow` | the launcher (POSIX sh): finds or fetches the flow binary and runs it (see [The flow binary](#the-flow-binary)) |
-| `src/`, `Cargo.toml`, `Cargo.lock` | the CLI and both hooks, in Rust (one binary, `flow`; `templates/` are compiled in): `main.rs` dispatches, `commands.rs` and `hooks.rs` are the entry points, `checks.rs` what each phase needs, `shell.rs` reads Bash commands, `markdown.rs` the artifacts, `specs.rs` the living spec, `config.rs` the JSON files, `repo.rs` the repo and its fingerprints, `deploy.rs` CI runs and the health check, `paths.rs` and `error.rs` the rest |
+| `src/`, `Cargo.toml`, `Cargo.lock` | the CLI and both hooks, in Rust (one binary, `flow`; `templates/` are compiled in): `main.rs` dispatches, `commands.rs` and `hooks.rs` are the entry points, `checks.rs` what each phase needs, `shell.rs` reads Bash commands, `markdown.rs` the artifacts, `specs.rs` the living spec, `judge.rs` `flow judge` (its brief in `judge.md`), `config.rs` the JSON files, `repo.rs` the repo and its fingerprints, `deploy.rs` CI runs and the health check, `paths.rs` and `error.rs` the rest |
 | `rustfmt.toml` | `cargo fmt` settings |
 | `.github/workflows/` | `ci.yml` (fmt, clippy and every test suite on Linux and macOS; the release pin on main) and `release.yml` (the four release binaries) |
 | `VERSION`, `SHA256SUMS` | the release bin/flow runs, and its pinned checksums (see [Releasing](#releasing)) |
@@ -403,10 +450,14 @@ first release is pinned, bin/flow builds flow from source everywhere.
 
 Open defects, found in the 2026-10-18 review; each needs a fix and a test.
 
-- `.flow.json`, `<work_dir>/templates/` and `STANDING.md` are not protected:
-  the agent can edit them in any phase, changing the rules mid-feature. Nor is
-  `<work_dir>/specs/`: the living spec can change outside a feature's approved
-  spec changes.
+- With no feature active, the agent can edit `.flow.json`,
+  `<work_dir>/templates/`, `STANDING.md` and `<work_dir>/specs/`: rules changed
+  before `flow new` (and before a `flow delegate`) are the ones the feature runs
+  under.
+- `flow judge` runs the `claude` on the agent's PATH, so an agent that changes
+  PATH can put its own judge there. The judge also reads what the agent wrote,
+  and a model can be talked round where a hash can't: a delegated gate is only as
+  strong as the judge.
 - flow does not commit the living spec's merge at done, and nothing checks
   that it was committed.
 - `flow gates` fingerprints the tree after the commands run, so a gate that

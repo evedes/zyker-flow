@@ -25,6 +25,8 @@ pub struct Config {
     pub codegen: Vec<String>,
     #[serde(default, deserialize_with = "deploy_section")]
     pub deploy: Option<Deploy>,
+    #[serde(default)]
+    pub judge: Judge,
     /// Read only for its effect: with a flattened field, serde reads the config from a
     /// JSON object only, never positionally from an array.
     #[serde(flatten)]
@@ -63,6 +65,16 @@ pub struct Deploy {
     pub status_command: Option<StatusCommand>,
     pub branch: Option<String>,
     pub health_url: Option<String>,
+    /// As in [`Config`]: an object only.
+    #[serde(flatten)]
+    _rest: Extra,
+}
+
+/// How `flow judge` runs its reviewer (`claude -p`).
+#[derive(Deserialize, Default)]
+pub struct Judge {
+    pub model: Option<String>,
+    pub max_budget_usd: Option<f64>,
     /// As in [`Config`]: an object only.
     #[serde(flatten)]
     _rest: Extra,
@@ -178,6 +190,11 @@ pub struct State {
     pub history: Vec<Event>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub reviewed_fingerprint: Option<Option<String>>,
+    /// The gates the user lets the judge pass, by gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated: Option<BTreeMap<String, Delegation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judgements: Option<Vec<Judgement>>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -190,13 +207,25 @@ impl State {
     pub fn gates(&self) -> Option<&Gates> {
         self.gates.as_ref()?.as_ref()
     }
+
+    /// The user's delegation of `gate` to the judge, if they made one.
+    pub fn delegated(&self, gate: Phase) -> Option<&Delegation> {
+        self.delegated.as_ref()?.get(gate.name())
+    }
+
+    pub fn judgements(&self) -> &[Judgement] {
+        self.judgements.as_deref().unwrap_or_default()
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Approval {
-    /// The artifact's hash (null when there was none).
+    /// The artifact's hash (null when there was none); for review, the code's fingerprint.
     pub hash: Option<String>,
     pub at: String,
+    /// "judge" when `flow judge` gave it; the user's have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -216,6 +245,33 @@ pub struct GateResult {
     pub source: String,
     pub command: String,
     pub exit: i32,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct Delegation {
+    pub at: String,
+    /// How many judgements there were then: only rejections after them count.
+    pub judgements: usize,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A verdict of `flow judge` on one version of a gate's artifacts.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Judgement {
+    pub gate: String,
+    /// What was judged: the artifact's hash, or the code's fingerprint for review.
+    pub hash: String,
+    /// approve, reject or ask-user.
+    pub verdict: String,
+    pub summary: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+    #[serde(default)]
+    pub questions: Vec<String>,
+    pub at: String,
     #[serde(flatten)]
     pub extra: Extra,
 }

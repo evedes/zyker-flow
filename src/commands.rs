@@ -2,10 +2,12 @@
 
 use crate::checks::{check, stale_approvals};
 use crate::config::{
-    now, read_json, write_json, Approval, Event, Extra, GateResult, Gates, Phase, State,
+    now, read_json, write_json, Approval, Delegation, Event, Extra, GateResult, Gates, Judgement,
+    Phase, State,
 };
 use crate::deploy::{self, exit_code};
 use crate::error::{bail, Error, Result};
+use crate::judge::{self, Verdict, GATES, MAX_REJECTS};
 use crate::markdown::{gate_commands, Sections};
 use crate::paths::{file_name, flow_cmd, io_error, write};
 use crate::repo::{git, Repo};
@@ -91,6 +93,8 @@ pub fn new(repo: &Repo, args: &[String]) -> Result<i32> {
         gates: Some(None),
         history: vec![Event::now(Phase::Explore)],
         reviewed_fingerprint: None,
+        delegated: None,
+        judgements: None,
         extra: Extra::new(),
     };
     repo.save_state(&fid, &st)?;
@@ -118,12 +122,21 @@ pub fn status(repo: &Repo) -> Result<i32> {
         }
     };
     println!("phase: {}", Phase::ALL.map(phase).join(" > "));
-    for kind in Phase::APPROVABLE {
-        if st.approval(kind).is_some() {
+    for kind in GATES {
+        if let Some(a) = st.approval(kind) {
             let stale = "STALE (artifact changed since approval)";
             let valid = repo.approval_valid(&fid, &st, kind)?;
-            println!("approval {kind}: {}", if valid { "valid" } else { stale });
+            let by = if a.by.is_some() { " (by the judge)" } else { "" };
+            println!("approval {kind}: {}{by}", if valid { "valid" } else { stale });
         }
+    }
+    let delegated: Vec<&str> =
+        GATES.iter().filter(|g| st.delegated(**g).is_some()).map(|g| g.name()).collect();
+    if !delegated.is_empty() {
+        println!("delegated to the judge: {}", delegated.join(", "));
+    }
+    if let Some(j) = st.judgements().iter().rev().find(|j| j.gate == st.phase.name()) {
+        println!("judge on {}: {} — {}", j.gate, j.verdict, j.summary);
     }
     if let Some(gates) = st.gates() {
         let result = if gates.passed { "passed" } else { "FAILED" };
@@ -218,9 +231,11 @@ pub fn back(repo: &Repo) -> Result<i32> {
 pub fn approve(repo: &Repo, args: &[String]) -> Result<i32> {
     let (fid, mut st) = repo.require_active()?;
     let kind = match args {
-        [a] if a == "spec" => Phase::Spec,
-        [a] if a == "tickets" => Phase::Tickets,
-        _ => bail!("usage: flow approve spec|tickets"),
+        [a] => GATES.into_iter().find(|g| g.name() == a),
+        _ => None,
+    };
+    let Some(kind) = kind else {
+        bail!("usage: flow approve spec|tickets|review");
     };
     if st.phase != kind {
         bail!("{kind} can only be approved in phase {kind} (now {})", st.phase);
@@ -229,13 +244,145 @@ pub fn approve(repo: &Repo, args: &[String]) -> Result<i32> {
     if !problems.is_empty() {
         bail!("{kind} is not complete:\n{}", bullets(&problems));
     }
-    let hash = repo.artifact_hash(&fid, kind)?;
+    let hash = repo.gate_hash(&fid, kind)?;
     let approval = Approval { hash, at: now(), ..Default::default() };
     let approvals = st.approvals.get_or_insert_with(Default::default);
     approvals.insert(kind.name().into(), approval);
     repo.save_state(&fid, &st)?;
-    println!("{kind} approved; it stays approved until the file changes");
+    let until = if kind == Phase::Review { "the code" } else { "the file" };
+    println!("{kind} approved; it stays approved until {until} changes");
     Ok(0)
+}
+
+pub fn delegate(repo: &Repo, args: &[String]) -> Result<i32> {
+    let (fid, mut st) = repo.require_active()?;
+    let usage = "usage: flow delegate spec|tickets|review... (or off)";
+    if let [off] = args {
+        if off == "off" {
+            st.delegated = None;
+            repo.save_state(&fid, &st)?;
+            println!("{fid}: nothing is delegated; spec, tickets and review need the user");
+            return Ok(0);
+        }
+    }
+    let gates: Option<Vec<Phase>> =
+        args.iter().map(|a| GATES.into_iter().find(|g| g.name() == a)).collect();
+    let Some(gates) = gates.filter(|g| !g.is_empty()) else {
+        bail!("{usage}");
+    };
+    let (at, judgements) = (now(), st.judgements().len());
+    let delegated = st.delegated.get_or_insert_with(Default::default);
+    for g in &gates {
+        let delegation = Delegation { at: at.clone(), judgements, ..Default::default() };
+        delegated.insert(g.name().into(), delegation);
+    }
+    repo.save_state(&fid, &st)?;
+    let names: Vec<&str> = gates.iter().map(|g| g.name()).collect();
+    println!(
+        "{fid}: the judge may pass {} (`flow judge`), until the feature is done or abandoned, \
+         or `flow delegate off`",
+        names.join(", ")
+    );
+    Ok(0)
+}
+
+/// Prints a judgement, as `flow judge` gives it.
+fn report(j: &Judgement) {
+    println!("judge: {} — {}", j.verdict, j.summary);
+    j.findings.iter().for_each(|f| println!("  - {f}"));
+    if !j.questions.is_empty() {
+        println!("questions for the user:");
+        j.questions.iter().for_each(|q| println!("  - {q}"));
+    }
+}
+
+/// review.md as the judge's record of its verdict on the code.
+fn review_record(st: &State, j: &Judgement) -> String {
+    let verdict = match j.verdict.as_str() {
+        "approve" => "pass",
+        "reject" => "fail",
+        _ => "undecided",
+    };
+    let list = |items: &[String]| match items {
+        [] => "None.".to_string(),
+        _ => items.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n"),
+    };
+    let mut text = format!(
+        "# Review: {}\n\n## Verdict\n{verdict} — {}\n\n## Findings\n{}\n",
+        st.title,
+        j.summary,
+        list(&j.findings)
+    );
+    if !j.questions.is_empty() {
+        text += &format!("\n## Questions for the user\n{}\n", list(&j.questions));
+    }
+    text + &format!("\nJudged by `flow judge` on fingerprint {} at {}.\n", j.hash, j.at)
+}
+
+pub fn judge(repo: &Repo) -> Result<i32> {
+    let (fid, st) = repo.require_active()?;
+    let (gate, cmd) = (st.phase, flow_cmd(&repo.root));
+    if !GATES.contains(&gate) {
+        bail!("the judge passes spec, tickets and review (now {gate})");
+    }
+    let Some(since) = st.delegated(gate).map(|d| d.judgements) else {
+        bail!(
+            "the user has not delegated {gate} to the judge: they approve it \
+             (`! {cmd} approve {gate}`), or delegate it (`! {cmd} delegate {gate}`)"
+        );
+    };
+    let problems = check(repo, &fid, &st, false)?;
+    if !problems.is_empty() {
+        bail!("{gate} is not ready to judge:\n{}", bullets(&problems));
+    }
+    let hash = repo.gate_hash(&fid, gate)?.unwrap_or_default();
+    let mine = |j: &&Judgement| j.gate == gate.name();
+    if let Some(j) = st.judgements().iter().filter(mine).find(|j| j.hash == hash) {
+        println!("the judge has judged this version of {gate} already");
+        report(j);
+        return Ok(if j.verdict == "approve" { 0 } else { 1 });
+    }
+    let since_delegated = st.judgements().iter().skip(since).filter(mine);
+    let rejects = since_delegated.filter(|j| j.verdict == "reject").count();
+    if rejects >= MAX_REJECTS {
+        bail!(
+            "the judge rejected {gate} {rejects} times since it was delegated: the user \
+             approves it (`! {cmd} approve {gate}`), or delegates it again for \
+             {MAX_REJECTS} more tries (`! {cmd} delegate {gate}`)"
+        );
+    }
+    println!("judging {gate} of {fid} with a read-only `claude -p`; this takes minutes");
+    let Verdict { verdict, summary, findings, questions } =
+        judge::ask(repo, &judge::prompt(repo, &fid, &st, gate)?)?;
+    if repo.gate_hash(&fid, gate)?.unwrap_or_default() != hash {
+        bail!("{gate} changed while the judge read it; nothing recorded: `{cmd} judge` again");
+    }
+    // The state is read again: the user may have acted meanwhile.
+    let (_, mut st) = repo.require_active()?;
+    let at = now();
+    let j = Judgement {
+        gate: gate.name().into(),
+        hash: hash.clone(),
+        verdict,
+        summary,
+        findings,
+        questions,
+        at: at.clone(),
+        ..Default::default()
+    };
+    if gate == Phase::Review {
+        write(&repo.fdir(&fid).join("review.md"), review_record(&st, &j))?;
+    }
+    let approved = j.verdict == "approve";
+    if approved {
+        let by = Some("judge".to_string());
+        let approval = Approval { hash: Some(hash), at, by, ..Default::default() };
+        st.approvals.get_or_insert_with(Default::default).insert(gate.name().into(), approval);
+    }
+    report(&j);
+    st.judgements.get_or_insert_with(Vec::new).push(j);
+    repo.save_state(&fid, &st)?;
+    Ok(if approved { 0 } else { 1 })
 }
 
 pub fn gates(repo: &Repo) -> Result<i32> {

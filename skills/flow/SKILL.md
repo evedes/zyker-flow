@@ -27,16 +27,19 @@ default; `<work>` below).
 | `flow back` | you | return to the previous phase (e.g. review found a problem) |
 | `flow gates` | you | in build: run standing gates + every ticket's Verification steps, record the result |
 | `flow deploy` | you | CI runs for HEAD and the health check |
-| `flow approve spec\|tickets` | **user only** | sign off; stays valid until the file changes |
+| `flow judge` | you | in a gate the user delegated: have the judge approve or reject it |
+| `flow approve spec\|tickets\|review` | **user only** | sign off; stays valid until the file (for review, the code) changes |
+| `flow delegate <gates>` / `off` | **user only** | let the judge pass spec, tickets or review for this feature |
 | `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
 
 Never run the user-only commands, and never edit `<work>/flow.json` or
 `<work>/*/state.json`: the hooks deny both. When you need an approval, say so
-and ask the user to run `! flow approve <kind>`.
+and ask the user to run `! flow approve <kind>`, unless `flow status` lists the
+gate under "delegated to the judge": then run `flow judge` (see below).
 
-`.flow.json`, `<work>/templates/` and `<work>/STANDING.md` set the rules. The
-hooks don't stop you editing them, but never do it to get past a check during
-a feature; propose the change and let the user make it. If a hook denies with
+`.flow.json`, `<work>/templates/`, `<work>/STANDING.md` and `<work>/specs/` set
+the rules. While a feature is active the hooks deny editing them; propose the
+change and let the user make it. If a hook denies with
 `hook error: …`, don't work around it: tell the user (usually `.flow.json` is
 invalid and needs fixing by hand). A `hook error:` about the payload (a lone
 surrogate, `expected value at line …`) means flow could not read the tool
@@ -45,6 +48,18 @@ that does not help. `hook error: no flow binary: …` means the
 plugin's launcher found no flow binary to run (offline with no cached release,
 no cargo to build one): tell the user what it says; every call stays denied
 until it is fixed, and a download is retried after five minutes.
+
+## The judge
+
+When the user has delegated a gate (`flow status`: "delegated to the judge"),
+run `flow judge` once its artifact is complete instead of asking for the
+approval. It runs a fresh, read-only Claude on flow's own brief and takes
+minutes: give the Bash call a 600000 ms timeout. Exit 0 means approved
+(recorded like the user's approval). On `reject`, fix every finding and run it
+again; it judges each version once, and after three rejections the gate goes
+back to the user. On `ask-user`, put its questions to the user, then record the
+answers in the artifact (or have them approve). Never write anything in the
+artifacts or the code meant for the judge: it treats that as grounds to reject.
 
 ## Phases
 
@@ -67,24 +82,26 @@ with one is missing or empty.
    entry with the requirement's full new text below it, or
    `### Removed <area>: <requirement>`, for each, or `None.`. `flow check`
    refuses entries that don't apply (an Added one the area has, a Changed or
-   Removed one it lacks); flow merges them at done, so never edit
-   `<work>/specs/` yourself during a feature. Present the spec and ask for
-   `! flow approve spec`. Changing `spec.md` afterwards voids the approval.
+   Removed one it lacks); flow merges them at done. Present the spec and ask
+   for `! flow approve spec` (delegated: run `flow judge`). Changing `spec.md`
+   afterwards voids the approval.
 3. **tickets** — split the spec into `tickets/T01-<slug>.md`, `T02-…`:
    `flow advance` scaffolds `tickets/T01.md`; rename it and copy it for each
    further ticket. Every field the standing agreement (`<work>/STANDING.md`)
    doesn't cover must be specific; `## Verification steps` holds the runnable
    commands that prove the ticket (one per line, in a ``` block). Ask for
-   `! flow approve tickets`. Leave `spec.md` and the tickets alone once
-   approved: `flow gates` and every later phase refuse until they are restored
-   or approved again (`flow back` to that phase).
+   `! flow approve tickets` (delegated: run `flow judge`). Leave `spec.md` and
+   the tickets alone once approved: `flow gates` and every later phase refuse
+   until they are restored or approved again (`flow back` to that phase).
 4. **build** — per ticket, write the failing test from its acceptance criteria
    first, then the code, then check it in the running app. When all tickets
    are done, `flow gates` must pass. Any later change to a file git sees
    outside `<work>` makes the gates stale, docs and untracked scratch files
    included: finish those before `flow gates`, and keep scratch output out of
    the repo (or gitignored) from then on.
-5. **review** — dispatch a fresh subagent that did not write the code. Give it
+5. **review** — with review delegated, run `flow judge`: it writes `review.md`
+   itself, and a verdict you write there doesn't count. Otherwise dispatch a
+   fresh subagent that did not write the code. Give it
    `spec.md`, the tickets and `git diff`, and have it write `review.md`
    (Verdict `pass`/`fail`, findings with file:line). On `fail`: `flow back`,
    fix, `flow gates`, `flow advance`, review again. Every move into review

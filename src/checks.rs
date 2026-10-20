@@ -29,13 +29,18 @@ pub fn stale_approvals(repo: &Repo, fid: &str, st: &State) -> Result<Vec<String>
     Ok(stale)
 }
 
-/// What blocks leaving the current phase; `flow approve` asks without `own_approval`.
+/// What blocks leaving the current phase. Without `own_approval`, what blocks approving it
+/// (`flow approve`, `flow judge`): the approval itself isn't asked for.
 pub fn check(repo: &Repo, fid: &str, st: &State, own_approval: bool) -> Result<Vec<String>> {
     let d = repo.fdir(fid);
     let mut problems = stale_approvals(repo, fid, st)?;
     let approval = |what: &str, kind: Phase| {
         let cmd = flow_cmd(&repo.root);
-        format!("{what} the user's approval: `! {cmd} approve {kind}`")
+        let judge = match st.delegated(kind) {
+            Some(_) => format!(", or the judge's: `{cmd} judge`"),
+            None => String::new(),
+        };
+        format!("{what} the user's approval: `! {cmd} approve {kind}`{judge}")
     };
     match st.phase {
         Phase::Explore | Phase::Spec => {
@@ -80,12 +85,19 @@ pub fn check(repo: &Repo, fid: &str, st: &State, own_approval: bool) -> Result<V
             }
         }
         Phase::Review => {
-            let required = repo.required_sections("review.md")?;
-            let review = Doc::load(&d.join("review.md"))?;
-            problems.extend(check_doc(review.as_ref(), &required, "review.md"));
-            let verdict = review.as_ref().map_or("", |r| r.sections.get("verdict"));
-            if !VERDICT_PASS.is_match(verdict) {
-                problems.push("review.md: '## Verdict' does not start with 'pass'".into());
+            // An approval of the code as it is now (the user's or the judge's) passes review.
+            // Delegated, review.md is the judge's record: no verdict the agent writes counts.
+            let approved = !own_approval || repo.approval_valid(fid, st, Phase::Review)?;
+            if !approved && st.delegated(Phase::Review).is_some() {
+                problems.push(approval("review needs", Phase::Review));
+            } else if !approved {
+                let required = repo.required_sections("review.md")?;
+                let review = Doc::load(&d.join("review.md"))?;
+                problems.extend(check_doc(review.as_ref(), &required, "review.md"));
+                let verdict = review.as_ref().map_or("", |r| r.sections.get("verdict"));
+                if !VERDICT_PASS.is_match(verdict) {
+                    problems.push("review.md: '## Verdict' does not start with 'pass'".into());
+                }
             }
             if !repo.gates_current(st)? {
                 let why = "code changed since the gates passed: `flow back`, fix, `flow gates`";

@@ -17,6 +17,19 @@ use std::path::PathBuf;
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 const STATE_FILES: &str = "state files are written only by the flow CLI";
 
+/// Why the rules can't change now: a feature is active.
+fn rules_problem(repo: &Repo) -> Result<Option<String>> {
+    let Some((fid, _)) = repo.active()? else {
+        return Ok(None);
+    };
+    let work = &repo.work_rel;
+    Ok(Some(format!(
+        "while {fid} is active, the rules it is judged by (.flow.json, {work}/STANDING.md, \
+         {work}/templates/, {work}/specs/) change only by hand: propose the change and let \
+         the user make it"
+    )))
+}
+
 /// A string field of the payload: "" when not given.
 fn text<'a>(field: Option<&'a Value>, name: &str) -> Result<&'a str> {
     match field {
@@ -176,6 +189,9 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
         if repo.is_state_file(&rel) {
             return Ok(Some(STATE_FILES.into()));
         }
+        if repo.is_rule_file(&rel) {
+            return rules_problem(&repo);
+        }
         if !paused && repo.is_protected(&rel) {
             return code_edit_problem(&repo);
         }
@@ -190,23 +206,28 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
         let (names, cmd) = (USER_ONLY.join("/"), flow_cmd(&repo.root));
         return Ok(Some(format!("{names} are the user's: they run them as `! {cmd} ...`")));
     }
-    // What a mutating command must not name: a state file, a protected path.
+    // What a mutating command must not name: a state file, a rule file, a protected path.
     let work = regex::escape(&repo.work_rel);
     let names_state = repo.names(&format!(r#"{work}/(?:flow\.json|[^/\s'"]+/state\.json)"#))?;
+    let names_rules =
+        repo.names(&format!(r"\.flow\.json|{work}/(?:STANDING\.md|templates|specs)"))?;
     let protected: Vec<String> = repo.protected.iter().map(|p| regex::escape(p)).collect();
     let names_code = (!protected.is_empty()).then(|| repo.names(&protected.join("|")));
     let names_code = names_code.transpose()?;
-    let (mut writes_state, mut writes_code, mut codegen) = (false, false, false);
+    let (mut writes_state, mut writes_rules) = (false, false);
+    let (mut writes_code, mut codegen) = (false, false);
     for c in &cmds {
         let c = without_discards(c);
         let targets: Vec<String> =
             redirect_targets(&c).iter().filter_map(|t| repo.rel(t)).collect();
         writes_state |= targets.iter().any(|t| repo.is_state_file(t));
+        writes_rules |= targets.iter().any(|t| repo.is_rule_file(t));
         writes_code |= targets.iter().any(|t| repo.is_protected(t));
         if MUTATES.is_match(&c) {
             // An absolute path names what it resolves to, symlinks and all.
             let abs: Vec<String> = absolute_words(&c).iter().filter_map(|w| repo.rel(w)).collect();
             writes_state |= names_state.is_match(&c) || abs.iter().any(|r| repo.is_state_file(r));
+            writes_rules |= names_rules.is_match(&c) || abs.iter().any(|r| repo.is_rule_file(r));
             let code = names_code.as_ref().is_some_and(|re| re.is_match(&c));
             writes_code |= code || abs.iter().any(|r| repo.is_protected(r));
         }
@@ -214,6 +235,11 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
     }
     if writes_state {
         return Ok(Some(STATE_FILES.into()));
+    }
+    if writes_rules {
+        if let Some(problem) = rules_problem(&repo)? {
+            return Ok(Some(problem));
+        }
     }
     if paused {
         return Ok(None);
