@@ -15,6 +15,8 @@ use std::io;
 use std::path::PathBuf;
 
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+/// The tools that run a shell `command` (Monitor streams its output as events).
+const SHELL_TOOLS: [&str; 2] = ["Bash", "Monitor"];
 const STATE_FILES: &str = "state files are written only by the flow CLI";
 
 /// Why the rules can't change now: a feature is active.
@@ -24,9 +26,9 @@ fn rules_problem(repo: &Repo) -> Result<Option<String>> {
     };
     let work = &repo.work_rel;
     Ok(Some(format!(
-        "while {fid} is active, the rules it is judged by (.flow.json, {work}/STANDING.md, \
-         {work}/templates/, {work}/specs/) change only by hand: propose the change and let \
-         the user make it"
+        "while {fid} is active, the rules it is judged by (.flow.json, .claude/settings.json, \
+         .claude/settings.local.json, {work}/STANDING.md, {work}/templates/, {work}/specs/) \
+         change only by hand: propose the change and let the user make it"
     )))
 }
 
@@ -197,7 +199,7 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
         }
         return Ok(None);
     }
-    if tool != "Bash" {
+    if !SHELL_TOOLS.contains(&tool) {
         return Ok(None);
     }
 
@@ -209,8 +211,9 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
     // What a mutating command must not name: a state file, a rule file, a protected path.
     let work = regex::escape(&repo.work_rel);
     let names_state = repo.names(&format!(r#"{work}/(?:flow\.json|[^/\s'"]+/state\.json)"#))?;
-    let names_rules =
-        repo.names(&format!(r"\.flow\.json|{work}/(?:STANDING\.md|templates|specs)"))?;
+    let names_rules = repo.names(&format!(
+        r"\.flow\.json|\.claude/settings(?:\.local)?\.json|{work}/(?:STANDING\.md|templates|specs)"
+    ))?;
     let protected: Vec<String> = repo.protected.iter().map(|p| regex::escape(p)).collect();
     let names_code = (!protected.is_empty()).then(|| repo.names(&protected.join("|")));
     let names_code = names_code.transpose()?;

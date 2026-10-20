@@ -63,6 +63,25 @@ fn quote(s: &str) -> String {
     format!("{q}{body}{q}")
 }
 
+/// A protected path as [`Repo::is_protected`] compares it, `/`-separated without `.`, empty
+/// parts or a trailing `/` (`./lib/` is `lib`). One that would protect nothing or the whole
+/// repo without saying so is an error.
+fn protected_path(p: &str) -> Result<String> {
+    let parts: Vec<&str> = p.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+    let why = if p.starts_with('/') {
+        "is absolute; protected paths are relative to the git root"
+    } else if parts.contains(&"..") {
+        "leaves the repo"
+    } else if p.contains(['*', '?', '[']) {
+        "is a glob; protected paths are path prefixes"
+    } else if parts.is_empty() {
+        "names the whole repo"
+    } else {
+        return Ok(parts.join("/"));
+    };
+    bail!(".flow.json protected path {}: {why}", quote(p))
+}
+
 pub struct Repo {
     pub root: PathBuf,
     real_root: PathBuf,
@@ -80,8 +99,8 @@ impl Repo {
         let Ok(work_rel) = work.strip_prefix(root).map(posix) else {
             bail!("work_dir {} is not inside {}", config.work_dir, root.display());
         };
-        let protected = config.protected_paths.iter();
-        let protected = protected.map(|p| p.trim_end_matches('/').to_string()).collect();
+        let protected = config.protected_paths.iter().map(|p| protected_path(p));
+        let protected = protected.collect::<Result<_>>()?;
         // No backtracking limit: a long command is judged, not failed.
         let compile = |p: &String| {
             RegexBuilder::new(p)
@@ -196,11 +215,14 @@ impl Repo {
         r == "flow.json" || id.is_some_and(|id| !id.is_empty() && !id.contains('/'))
     }
 
-    /// .flow.json, <work_dir>/STANDING.md, <work_dir>/templates/ and <work_dir>/specs/: what
-    /// a feature is judged by.
+    /// .flow.json, .claude/settings.json and settings.local.json (the hooks and deny rules),
+    /// <work_dir>/STANDING.md, <work_dir>/templates/ and <work_dir>/specs/: what a feature
+    /// is judged by.
     pub fn is_rule_file(&self, rel: &str) -> bool {
         let work = |p: &str| format!("{}/{p}", self.work_rel);
         rel == ".flow.json"
+            || rel == ".claude/settings.json"
+            || rel == ".claude/settings.local.json"
             || rel == work("STANDING.md")
             || under(rel, &work("templates"))
             || under(rel, &work("specs"))

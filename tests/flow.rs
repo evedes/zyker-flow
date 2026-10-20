@@ -151,6 +151,35 @@ fn bash_writes_to_code_follow_the_phase() {
     }
     assert_eq!(t.bash("grep -r hello lib/ 2>/dev/null"), None);
     assert_eq!(t.bash("ls lib/ >/dev/null 2>&1"), None);
+    // Monitor runs its command in the same shell as Bash.
+    let monitor = t.hook("Monitor", json!({"command": "echo x > lib/app.ex; echo done"}));
+    assert_in("phase explore", &denied(monitor));
+    assert_eq!(t.hook("Monitor", json!({"command": "tail -f lib/app.ex"})), None);
+    assert_eq!(t.hook("Monitor", json!({"ws": {"url": "wss://example.com"}})), None);
+}
+
+#[test]
+fn protected_paths_are_normalized_or_refused() {
+    let t = Flow::new();
+    t.flow(&["new", "hello"]);
+    t.configure(json!({"protected_paths": ["./lib/", "src//./core/"]}));
+    for rel in ["lib/app.ex", "src/core/x.rs"] {
+        assert_in("phase explore", &denied(t.edit(rel)));
+        assert_in("phase explore", &denied(t.bash(&format!("echo x > {rel}"))));
+    }
+    assert_eq!(t.edit("src/other.rs"), None);
+    for (p, why) in [
+        ("/lib/", "is absolute"),
+        ("../lib", "leaves the repo"),
+        ("lib/**", "is a glob"),
+        ("./", "names the whole repo"),
+        ("", "names the whole repo"),
+    ] {
+        t.configure(json!({"protected_paths": ["lib/", p]}));
+        let error = format!(".flow.json protected path '{p}': {why}");
+        assert_in(&format!("hook error: {error}"), &denied(t.edit("README.md")));
+        assert_in(&error, &t.flow_any(&["status"]).stderr);
+    }
 }
 
 #[test]
@@ -218,6 +247,7 @@ fn command_provider_gates_push() {
     let runs = |status: &str| json!([{"name": "deploy", "status": status, "head_sha": "abc1234"}]);
     t.write("runs.json", runs("running").to_string());
     assert_in("deploy=running", &denied(t.bash("git push")));
+    assert_in("deploy=running", &denied(t.bash("git -P push origin main")));
     t.write("runs.json", runs("success").to_string());
     assert_eq!(t.bash("git push"), None);
     t.write("runs.json", r#"{"not": "a list"}"#);
@@ -509,14 +539,26 @@ fn spec_changes_are_checked_again_before_done() {
 fn rules_change_only_by_hand_while_a_feature_is_active() {
     let t = Flow::new();
     t.write("work/specs/greeting.md", "# greeting\n");
-    for rule in [".flow.json", "work/STANDING.md", "work/templates/spec.md", "work/specs/x.md"] {
+    let rules = [
+        ".flow.json",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        "work/STANDING.md",
+        "work/templates/spec.md",
+        "work/specs/x.md",
+    ];
+    for rule in rules {
         assert_eq!(t.edit(rule), None, "{rule} with no feature active");
     }
     t.flow(&["new", "hello"]);
-    for rule in [".flow.json", "work/STANDING.md", "work/templates/spec.md", "work/specs/x.md"] {
+    for rule in rules {
         assert_in("change only by hand", &denied(t.edit(rule)));
     }
+    assert_eq!(t.edit(".claude/agents/x.md"), None);
     assert_in("change only by hand", &denied(t.bash("echo '{}' > .flow.json")));
+    let hooks_off = "echo '{\"disableAllHooks\": true}' > .claude/settings.local.json";
+    assert_in("change only by hand", &denied(t.bash(hooks_off)));
+    assert_in("change only by hand", &denied(t.bash("rm .claude/settings.json")));
     assert_in("change only by hand", &denied(t.bash("rm -r work/specs")));
     assert_in("change only by hand", &denied(t.bash("sed -i s/a/b/ work/STANDING.md")));
     assert_eq!(t.bash("cat .flow.json work/specs/greeting.md"), None);
@@ -787,6 +829,8 @@ fn commit_of_staged_docs_is_allowed_mid_feature() {
         "git add -A && git commit -m docs",
         "git commit -p -m docs",
         "git commit --all -m x",
+        "git commit --pathspec-from=/tmp/list -m docs",
+        "git -P commit -am docs",
         "git commit -m \"$(git add -A)\"",
         "git commit -m `git add -A`",
         "git commit -F <(git add -A)",
@@ -1447,6 +1491,9 @@ fn bash_edge_cases() {
         ("git commit -m \"$(git add -A)\"", Commit),
         ("git -c a=b commit -m x", Commit),
         ("git --no-pager commit", Commit),
+        ("git -P commit -am x", Commit),
+        ("git --git-dir .git commit -am x", Commit),
+        ("git commit --pathspec-from=f -m x", Commit),
         ("git commit-tree x", Commit),
         ("git log --grep commit", Allowed),
         ("echo git commit", Commit),

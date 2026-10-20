@@ -12,7 +12,7 @@ known limitations. `CLAUDE.md` is a symlink to this file.
   own path: this checkout's `target/release/flow`, rebuilt by cargo when a
   source is newer, else the pinned release binary (README, "The flow binary").
   `hooks/hooks.json` runs the launcher on every Edit/Write/MultiEdit/
-  NotebookEdit/Bash call and at session start; `skills/flow/SKILL.md` tells
+  NotebookEdit/Bash/Monitor call and at session start; `skills/flow/SKILL.md` tells
   the agent how to run each phase; `templates/` are the artifact skeletons
   (and decide what `flow check` requires).
 - Write plain Rust: serde types, one `Error` with `?`, fancy-regex for codegen

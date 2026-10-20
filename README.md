@@ -21,7 +21,7 @@ nothing.
 | No `git push` while a CI/deploy run is in flight | hook on `git push` (the `deploy` provider) |
 | Spec and tickets need the user's approval, or the judge's where the user delegated it; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again | CLI |
 | A delegated review needs the judge's approval (or the user's) of the exact code; a verdict the agent writes in `review.md` doesn't count | CLI |
-| While a feature is active, the rules it is judged by (`.flow.json`, `<work_dir>/STANDING.md`, `<work_dir>/templates/`, `<work_dir>/specs/`) change only by hand | hook |
+| While a feature is active, the rules it is judged by (`.flow.json`, `.claude/settings.json` and `.claude/settings.local.json`, which hold the hooks and deny rules, `<work_dir>/STANDING.md`, `<work_dir>/templates/`, `<work_dir>/specs/`) change only by hand | hook |
 | The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply | CLI |
 | A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
 | The agent can't run `approve`, `delegate`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
@@ -34,10 +34,12 @@ gates stale, and the commit is refused until they are rerun.
 
 The commit hook judges a lone `git commit` by what is staged, so a docs commit
 mid-feature goes through while code changes sit unstaged. Anything that can
-commit more than the index (`-a`, `-p`, `-i`, `-o`, a pathspec, another
-command in the same call, such as `git add -A && git commit`, or a `$(…)`,
-backtick or `<(…)` substitution, which could run one) is judged by the whole
-working tree instead. That includes the usual `-m "$(cat <<'EOF' …)"` message:
+commit more than the index (`-a`, `-p`, `-i`, `-o`, their long names or any
+prefix of them git would take, such as `--pathspec-from`, a pathspec, an
+option before `commit` such as `git -P commit`, another command in the same
+call, such as `git add -A && git commit`, or a `$(…)`, backtick or `<(…)`
+substitution, which could run one) is judged by the whole working tree
+instead. That includes the usual `-m "$(cat <<'EOF' …)"` message:
 for a docs commit mid-feature, use a literal `-m`.
 
 What hooks can't enforce is judgment: a thin spec can pass the section checks.
@@ -53,7 +55,7 @@ signatures. See [Known limitations](#known-limitations).
 ## How it works
 
 ```
-Claude Code ──PreToolUse (Edit|Write|MultiEdit|NotebookEdit|Bash)──> bin/flow hook pre-tool-use ──> allow / deny + reason
+Claude Code ──PreToolUse (Edit|Write|MultiEdit|NotebookEdit|Bash|Monitor)──> bin/flow hook pre-tool-use ──> allow / deny + reason
             ──SessionStart──────────────────────────────────────────> bin/flow hook session-start ──> phase + blockers as context
 agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>/<NNN-slug>/state.json + artifacts
 ```
@@ -68,7 +70,8 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
   records it; the review→ship move records it again as the reviewed
   fingerprint; `git commit` in ship needs the current tree to match both.
 - **Pre-tool-use hook.** Edit/Write tools: deny state files always, protected
-  paths outside build. Bash: the command is split into simple commands (quotes,
+  paths outside build. Bash and Monitor (which runs a shell command too): the
+  command is split into simple commands (quotes,
   `&&`/`||`/`;`/`|`, heredocs fed to `cat` dropped as data unless `cat` pipes
   them on), then each is
   checked for user-only `flow` subcommands, redirects into code or state
@@ -134,7 +137,7 @@ else its path (see [The flow binary](#the-flow-binary)).
 | Key | Meaning |
 |---|---|
 | `work_dir` | where feature records live (default `work`) |
-| `protected_paths` | path prefixes that count as code |
+| `protected_paths` | path prefixes that count as code, relative to the git root (`./lib/` is `lib`); an absolute one, one with `..` or a glob, and one naming the whole repo are errors |
 | `standing_gates` | shell commands `flow gates` runs at the git root, before every ticket's verification commands |
 | `codegen` | regexes ([fancy-regex](https://docs.rs/fancy-regex) syntax) for commands that write code without naming the files (generators, formatters); each is searched for in one simple command at a time |
 | `deploy` | optional; without it the push check and the ship→done CI check are skipped |
@@ -152,8 +155,9 @@ error. There is no backtracking limit, so a catastrophic pattern holds the hook
 until Claude Code's hook timeout.
 
 The config is read on every hook call. If it is not valid JSON, a known key has
-the wrong type, or a `codegen` pattern doesn't compile
-(`.flow.json codegen pattern '<p>': <error>`), every Edit/Write/Bash call is
+the wrong type, a `codegen` pattern doesn't compile
+(`.flow.json codegen pattern '<p>': <error>`) or a protected path is one of
+those errors (`.flow.json protected path '<p>': <why>`), every Edit/Write/Bash call is
 denied with `hook error: …` and the CLI fails, `pause` included. Fix
 `.flow.json` by hand (an editor or a `!` command), not through the agent.
 
@@ -318,7 +322,7 @@ In the plugin:
 | `rustfmt.toml` | `cargo fmt` settings |
 | `.github/workflows/` | `ci.yml` (fmt, clippy and every test suite on Linux and macOS; the release pin on main) and `release.yml` (the four release binaries) |
 | `VERSION`, `SHA256SUMS` | the release bin/flow runs, and its pinned checksums (see [Releasing](#releasing)) |
-| `hooks/hooks.json` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit\|Bash`, and `SessionStart` |
+| `hooks/hooks.json` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit\|Bash\|Monitor`, and `SessionStart` |
 | `skills/flow/SKILL.md` | how the agent runs each phase |
 | `templates/` | artifact skeletons; they decide what `flow check` requires |
 | `tests/` | end-to-end tests against throwaway git repos: `flow.rs` (the CLI and hooks), `launcher.rs` (bin/flow), `smoke.rs` (the smoke check, and its `real_repos` run) |
@@ -467,7 +471,9 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
   not that the reviewed code is what was committed.
 - Only `git commit` (and `commit-tree`) is gated; `merge`, `cherry-pick`,
   `revert`, `am`, `rebase` and `pull` are not.
-- Bash write detection misses `&>`/`&>>` redirects and `cd dir && …` into a
+- Bash write detection misses `&>`/`&>>` and `>|` redirects, git commands that
+  rewrite code without naming it (`git restore .`, `git reset --hard`), and
+  `cd dir && …` into a
   protected path, resolves relative paths against the git root rather than the
   shell's cwd, and denies copies *out of* protected paths
   (`cp lib/x /tmp/`).

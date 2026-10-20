@@ -37,8 +37,8 @@ Never run the user-only commands, and never edit `<work>/flow.json` or
 and ask the user to run `! flow approve <kind>`, unless `flow status` lists the
 gate under "delegated to the judge": then run `flow judge` (see below).
 
-`.flow.json`, `<work>/templates/`, `<work>/STANDING.md` and `<work>/specs/` set
-the rules. While a feature is active the hooks deny editing them; propose the
+`.flow.json`, `.claude/settings.json`, `.claude/settings.local.json`,
+`<work>/templates/`, `<work>/STANDING.md` and `<work>/specs/` set the rules. While a feature is active the hooks deny editing them; propose the
 change and let the user make it. If a hook denies with
 `hook error: …`, don't work around it: tell the user (usually `.flow.json` is
 invalid and needs fixing by hand). A `hook error:` about the payload (a lone

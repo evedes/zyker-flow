@@ -991,7 +991,7 @@ fn hooks_run_the_launcher_and_a_failing_pre_tool_use_hook_blocks() {
     let text = fs::read_to_string(repo_file("hooks/hooks.json")).unwrap();
     let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
     let pre = &hooks["hooks"]["PreToolUse"][0];
-    assert_eq!(pre["matcher"], "Edit|Write|MultiEdit|NotebookEdit|Bash");
+    assert_eq!(pre["matcher"], "Edit|Write|MultiEdit|NotebookEdit|Bash|Monitor");
     let cmd = &pre["hooks"][0];
     assert_eq!(cmd["command"], "\"${CLAUDE_PLUGIN_ROOT}\"/bin/flow hook pre-tool-use");
     assert_eq!(cmd["onFailure"], "block", "a launcher that fails or times out blocks");

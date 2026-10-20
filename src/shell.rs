@@ -24,8 +24,12 @@ pub static MUTATES: LazyLock<Regex> = regex!(concat!(
     r"\btouch\b|\btruncate\b|\bpatch\b|\bln\b|",
     r"\bgit\s+(checkout|restore|apply|stash|reset|mv|rm)\b"
 ));
-pub static GIT_COMMIT: LazyLock<Regex> = regex!(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*commit\b");
-pub static GIT_PUSH: LazyLock<Regex> = regex!(r"\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*push\b");
+/// git's options before the subcommand: any `-x` or `--x` word, and the next word after
+/// the ones that take it as their value.
+const GIT_OPTS: &str =
+    r"(?:(?:-[cC]|--(?:git-dir|work-tree|namespace|config-env|attr-source))\s+\S+\s+|-\S*\s+)*";
+pub static GIT_COMMIT: LazyLock<Regex> = regex!(&format!(r"\bgit\s+{GIT_OPTS}commit\b"));
+pub static GIT_PUSH: LazyLock<Regex> = regex!(&format!(r"\bgit\s+{GIT_OPTS}push\b"));
 /// A user-only command. The word ends at anything but a letter, a number or `_`, so
 /// `flow approve\u{301}` (a combining mark) is still caught.
 pub static USER_ONLY_CMD: LazyLock<Regex> = regex!(&format!(
@@ -179,7 +183,9 @@ pub fn commits_index_only(cmds: &[String]) -> bool {
     while let Some(w) = rest.next() {
         if let Some(long) = w.strip_prefix("--") {
             let name = format!("--{}", long.split('=').next().unwrap_or(""));
-            if w == "--" || COMMIT_WIDENS.contains(&name.as_str()) {
+            // git takes any unambiguous prefix of a long option for it (`--pathspec-from`).
+            let widens = |o: &&str| o.starts_with(&name);
+            if w == "--" || COMMIT_WIDENS.iter().any(widens) {
                 return false;
             }
             if COMMIT_VALUE_OPTS.contains(&name.as_str()) && !w.contains('=') {
@@ -308,10 +314,16 @@ mod tests {
             ("git commit -qm x --author='a <a@b>'", true), ("git commit -am x", false),
             ("git commit -m x lib", false), ("git commit -mx -v", true),
             ("git commit -m \"$(git add -A)\"", false), ("git -C . commit", false),
+            ("git commit --pathspec-from=f -m x", false), ("git commit --patc", false),
+            ("git commit --amend --no-edit", true),
         ] {
             assert_eq!(commits_index_only(&[cmd.to_string()]), staged, "{cmd}");
         }
         assert!(!commits_index_only(&["git add x".into(), "git commit -m x".into()]));
+        for cmd in ["git -P commit", "git --git-dir .git commit", "git -c a=b -p commit"] {
+            assert!(GIT_COMMIT.is_match(cmd), "{cmd}");
+        }
+        assert!(!GIT_COMMIT.is_match("git log -S commit"));
         let c = without_discards("ls lib >/dev/null 2>&1 >> out 3>x <>y &>z >'a b'");
         assert_eq!(redirect_targets(&c), ["out", "x", "a"]);
     }
