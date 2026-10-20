@@ -400,8 +400,9 @@ It runs the first of:
 2. `target/release/flow` in the plugin, a build of this checkout. When a file
    under `src/` or `templates/`, `Cargo.toml` or `Cargo.lock` is newer, it is
    rebuilt first (`cargo build --release --locked`, its output on stderr; if it
-   fails, the previous build runs, with a warning); a source saved while that
-   build runs is built next time. A hook call outside a flow repo runs the
+   fails, the previous build runs, with a warning, and the build is not tried
+   again for five minutes or until a source changes); a source saved while
+   that build runs is built next time. A hook call outside a flow repo runs the
    previous build without rebuilding, since it prints nothing there.
 3. The release binary of `VERSION` for this platform, cached in
    `${FLOW_CACHE_DIR:-${XDG_CACHE_HOME:-~/.cache}/flow}/<VERSION>/<target>/flow`
@@ -409,8 +410,9 @@ It runs the first of:
    match the `SHA256SUMS` committed next to `VERSION` (so the plugin's commit
    pins the binary, not the release page), it must run here, and it must have
    been built from this checkout's sources (the `source` line of
-   `SHA256SUMS`, as `scripts/source-hash` computes it; a `SHA256SUMS` without
-   that line counts as other sources). Once verified, a stamp in `target/`
+   `SHA256SUMS`, as `scripts/source-hash` computes it, dotfiles such as an
+   editor's swap file left out; a `SHA256SUMS` without that line counts as
+   other sources). Once verified, a stamp in `target/`
    naming that binary lets later calls skip the checks until the sources,
    `VERSION` or `SHA256SUMS` change.
 4. Otherwise flow is built from source with cargo, into `target/` (step 2
@@ -419,7 +421,8 @@ It runs the first of:
    the build fails) it runs the release built from other sources, with a
    warning on stderr.
 
-With none of these the hooks fail closed: in a repo with a `.flow.json`,
+With none of these the hooks fail closed: in a repo with a `.flow.json` (the
+hook's working directory's, or that of the `cwd` its input names),
 pre-tool-use denies every call (`no flow binary: <why>`) and session-start
 says why; elsewhere they do nothing, also offline. A binary that cannot be
 executed (another platform's, a `noexec` mount, a corrupt file) is caught too:
@@ -427,12 +430,13 @@ in hook mode the launcher runs the binary as a child and denies when the
 shell reports 126 or 127, and drops such a cached file. The pre-tool-use hook
 also has `"onFailure": "block"`, so a launcher that fails or times out blocks
 the call instead of letting it through. A download is tried once (60 s at
-most) and a failure is remembered for five minutes, so an offline machine is
-not held up on every call. `FLOW_BIN`, `FLOW_CACHE_DIR`, `XDG_CACHE_HOME` and
+most; with wget, only where `timeout` exists) and a failure to download or
+verify it is remembered for five minutes, as is a failed build from source
+(until a source changes), so an offline machine is not held up on every call. `FLOW_BIN`, `FLOW_CACHE_DIR`, `XDG_CACHE_HOME` and
 `HOME` are ignored unless they are absolute, since a relative one would
 resolve inside the guarded repo.
 
-The launcher exports `FLOW_SELF`, its own path with symlinks resolved, to the
+The launcher exports `FLOW_SELF`, its own path (symlinks to it followed), to the
 binary it runs. flow uses it where it names itself (`flow` when the `flow` on
 PATH is this launcher or a short script naming it, else this path, relative to
 the git root when inside it); a binary run directly names its own path.

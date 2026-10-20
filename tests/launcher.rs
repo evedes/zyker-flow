@@ -327,6 +327,12 @@ impl Env {
             fs::write(&p, format!("{f}\n")).unwrap();
             set_mtime(&p, old());
         }
+        // Dotfiles (an editor's swap file, .DS_Store) are not sources.
+        for f in ["src/.main.rs.swp", "templates/.DS_Store", "src/.cache/x.rs"] {
+            let p = self.path("plugin").join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "noise\n").unwrap();
+        }
         let listing: String = files
             .iter()
             .map(|f| format!("{}  {f}\n", sha256_hex(format!("{f}\n").as_bytes())))
@@ -521,6 +527,43 @@ fn failed_rebuild_runs_the_previous_build() {
         e.path("plugin").display()
     );
     assert!(r.err.ends_with(&want), "{}", r.err);
+    // Not retried until a source changes (or five minutes pass): offline, cargo would
+    // hold up every call.
+    let r = e.hook(&e.repo("app", true), "pre-tool-use");
+    r.assert_ran("dev", "hook pre-tool-use");
+    assert!(r.err.contains("(not retried for 5 minutes or until a source changes)"), "{}", r.err);
+    assert_eq!(e.log().matches("cargo build").count(), 1, "{}", e.log());
+    set_mtime(&e.path("plugin/target/.flow-build-failed"), old() + Duration::from_secs(1));
+    fs::write(e.path("plugin/src/main.rs"), "z").unwrap();
+    e.hook(&e.repo("app", true), "pre-tool-use");
+    assert_eq!(e.log().matches("cargo build").count(), 2, "{}", e.log());
+}
+
+#[test]
+fn a_failed_build_from_source_is_not_retried_until_a_source_changes() {
+    let mut e = Env::new();
+    e.sources();
+    e.publish(&stand_in("downloaded"), None, Some(&"1".repeat(64)));
+    e.fake("cargo", FAKE_CARGO);
+    e.set("FAKE_CARGO_FAIL", "1");
+    let r = e.run(&["status"]);
+    r.assert_ran("downloaded", "status");
+    assert!(r.err.contains("building it from source"), "{}", r.err);
+    let r = e.run(&["status"]);
+    r.assert_ran("downloaded", "status");
+    assert!(!r.err.contains("building it from source"), "{}", r.err);
+    let held = format!(
+        "cargo build --release failed in {} (not retried for 5 minutes or until a source \
+         changes); running the release",
+        e.path("plugin").display()
+    );
+    assert!(r.err.contains(&held), "{}", r.err);
+    assert_eq!(e.log().matches("cargo build").count(), 1, "{}", e.log());
+    e.unset("FAKE_CARGO_FAIL");
+    set_mtime(&e.path("plugin/target/.flow-build-failed"), old() + Duration::from_secs(1));
+    fs::write(e.path("plugin/templates/spec.md"), "changed\n").unwrap();
+    e.run(&["status"]).assert_ran("built", "status");
+    assert!(!e.path("plugin/target/.flow-build-failed").exists());
 }
 
 #[test]
@@ -677,6 +720,17 @@ fn download_falls_back_to_wget() {
 }
 
 #[test]
+fn wget_is_bounded_by_timeout_where_it_exists() {
+    let e = Env::new();
+    fs::remove_file(e.path("fake/curl")).unwrap();
+    e.fake("wget", FAKE_WGET);
+    e.fake("timeout", "#!/bin/sh\necho \"timeout $1\" >>\"$FAKE_LOG\"\nshift\nexec \"$@\"\n");
+    e.publish(&stand_in("downloaded"), None, None);
+    e.run(&["status"]).assert_ran("downloaded", "status");
+    assert_eq!(e.log(), format!("timeout 60\nwget {RELEASE}/{BINARY}\n"));
+}
+
+#[test]
 fn a_release_binary_other_than_the_pinned_one_is_neither_installed_nor_run() {
     let mut e = Env::new();
     e.set("FAKE_RAN", e.path("ran"));
@@ -688,8 +742,15 @@ fn a_release_binary_other_than_the_pinned_one_is_neither_installed_nor_run() {
     let why = format!("checksum mismatch for {BINARY} v{VERSION} (got {got}, want {pinned})");
     assert_eq!((r.code, r.out), (0, deny(&why)));
     assert!(!e.path("ran").exists());
-    let left = fs::read_dir(e.cached().parent().unwrap()).unwrap().count();
-    assert_eq!(left, 0, "nothing installed, no temporary file left");
+    let left: Vec<_> = fs::read_dir(e.cached().parent().unwrap())
+        .unwrap()
+        .map(|d| d.unwrap().file_name())
+        .collect();
+    assert_eq!(left, [".failed"], "nothing installed, no temporary file left");
+    // Like a failed download, it is not fetched again for five minutes.
+    let again = format!("{why} (not retried for 5 minutes)");
+    assert_eq!(e.hook(&e.repo("app", true), "pre-tool-use").out, deny(&again));
+    assert_eq!(e.log().lines().count(), 1, "{}", e.log());
 }
 
 #[test]
@@ -926,6 +987,24 @@ fn pre_tool_use_denies_in_a_flow_repo() {
 }
 
 #[test]
+fn the_payloads_cwd_counts_when_the_hook_runs_elsewhere() {
+    let (e, why) = unavailable();
+    let repo = e.repo("app", true);
+    let payload = format!(
+        r#"{{"cwd": "{}", "tool_name": "Bash", "tool_input": {{"command": "ls"}}}}"#,
+        repo.join("sub").display()
+    );
+    let r = e.run_in(&e.repo("plain", false), &["hook", "pre-tool-use"], &payload);
+    assert_eq!((r.code, r.out), (0, deny(&why)), "{}", r.err);
+    // With a binary to run, it gets the payload the launcher read.
+    e.publish(&stand_in("downloaded"), None, None);
+    let _ = fs::remove_file(e.cached().parent().unwrap().join(".failed"));
+    let r = e.run_in(&e.repo("plain", false), &["hook", "pre-tool-use"], &payload);
+    r.assert_ran("downloaded", "hook pre-tool-use");
+    assert!(r.out.contains(&format!("stdin={payload}")), "{}", r.out);
+}
+
+#[test]
 fn hooks_outside_a_flow_repo_stay_silent_and_offline() {
     let (e, _) = unavailable();
     for cwd in [e.repo("plain", false), e.path("work")] {
@@ -943,7 +1022,7 @@ fn session_start_says_why_in_a_flow_repo() {
     let r = e.run_in(&e.repo("app", true), &["hook", "session-start"], "{}");
     let ctx = format!(
         "flow: no flow binary ({why}), so the flow hook denies every Edit, Write, MultiEdit, \
-         NotebookEdit and Bash call in this repo. Tell the user: the plugin's bin/flow needs \
+         NotebookEdit, Bash and Monitor call in this repo. Tell the user: the plugin's bin/flow needs \
          network access to download its release binary, cargo to build it, or FLOW_BIN set \
          to one."
     );

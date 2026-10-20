@@ -48,6 +48,7 @@ hook=
 dev=$root/target/release/flow
 [ -x "$dev.exe" ] && dev=$dev.exe
 stamp=$root/target/.flow-release
+buildfail=$root/target/.flow-build-failed
 cached=
 why=
 
@@ -87,7 +88,7 @@ stale() {
 # dropped, to be downloaded and verified again).
 run() {
 	[ -n "$hook" ] || exec "$@"
-	"$@"
+	if [ -n "${input+x}" ]; then printf '%s\n' "$input" | "$@"; else "$@"; fi
 	rc=$?
 	[ $rc -eq 126 ] || [ $rc -eq 127 ] || exit $rc
 	what=$1
@@ -110,24 +111,34 @@ in_flow_repo() {
 	[ -f "$top/.flow.json" ]
 }
 
+# hook_repo: is the hook's repo a flow repo: the working directory's, or that of the
+# cwd its input names? The input is read for that, into $input, which run passes on.
+hook_repo() {
+	[ -n "${input+x}" ] || input=$(cat)
+	in_flow_repo && return 0
+	cwd=$(printf '%s\n' "$input" |
+		sed -n 's/^.*"cwd"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*$/\1/p')
+	[ -n "$cwd" ] && [ -d "$cwd" ] && (cd "$cwd" && in_flow_repo)
+}
+
 # fail WHY: there is no binary to run; fails closed as the mode requires.
 fail() {
-	[ -z "$hook" ] || cat >/dev/null 2>&1
 	case $hook in
 	'')
 		note "no flow binary: $1"
 		exit 1
 		;;
 	pre-tool-use)
-		in_flow_repo || exit 0
+		hook_repo || exit 0
 		json "flow: hook error: no flow binary: $1"
 		printf '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "%s"}}\n' "$json"
 		;;
 	session-start)
-		in_flow_repo || exit 0
-		json "flow: no flow binary ($1), so the flow hook denies every Edit, Write, MultiEdit, NotebookEdit and Bash call in this repo. Tell the user: the plugin's bin/flow needs network access to download its release binary, cargo to build it, or FLOW_BIN set to one."
+		hook_repo || exit 0
+		json "flow: no flow binary ($1), so the flow hook denies every Edit, Write, MultiEdit, NotebookEdit, Bash and Monitor call in this repo. Tell the user: the plugin's bin/flow needs network access to download its release binary, cargo to build it, or FLOW_BIN set to one."
 		printf '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$json"
 		;;
+	*) [ -n "${input+x}" ] || cat >/dev/null 2>&1 ;;
 	esac
 	exit 0
 }
@@ -143,18 +154,31 @@ have_cargo() {
 	[ -x "$cargo" ]
 }
 
+# held: did a build fail in the last five minutes, with no source saved since it
+# started? Then it is not retried yet (an offline cargo would hold every call up).
+held() {
+	recent "$buildfail" && ! stale "$buildfail" &&
+		because "$msg (not retried for 5 minutes or until a source changes)"
+}
+
 # build: cargo builds the plugin into <root>/target, its output on stderr. The build
-# gets the time it started, so that a source saved meanwhile is built next time.
+# gets the time it started, so that a source saved meanwhile is built next time; so
+# does a failure, which is remembered (see held).
 build() {
 	have_cargo || { because "no cargo to build it from source" && return 1; }
+	held && return 1
 	marker=$root/target/.flow-build.$$
-	mkdir -p "$root/target" && touch "$marker"
+	mkdir -p "$root/target" && touch "$marker" ||
+		{ because "cannot write to $root/target" && return 1; }
 	if ! "$cargo" build --release --locked --quiet --manifest-path "$root/Cargo.toml" \
 		--target-dir "$root/target" </dev/null >&2; then
+		err="cargo build --release failed in $root"
+		remember "$buildfail" "$err" && touch -r "$marker" "$buildfail"
 		rm -f "$marker"
-		because "cargo build --release failed in $root"
+		because "$err"
 		return 1
 	fi
+	rm -f "$buildfail"
 	[ -x "$root/target/release/flow.exe" ] && dev=$root/target/release/flow.exe
 	touch -r "$marker" "$dev" 2>/dev/null || touch "$dev"
 	rm -f "$marker"
@@ -179,9 +203,10 @@ pinned() {
 }
 
 # The hash of this checkout's sources: the SHA-256 of `sha256sum` over them, sorted
-# by path (scripts/source-hash prints the same).
+# by path, dotfiles (editor swap files, .DS_Store) left out as newer leaves them out
+# (scripts/source-hash prints the same).
 source_hash() {
-	(cd "$root" && find src templates Cargo.toml Cargo.lock -type f 2>/dev/null |
+	(cd "$root" && find src templates Cargo.toml Cargo.lock -type f ! -path '*/.*' 2>/dev/null |
 		LC_ALL=C sort | while IFS= read -r f; do sha256 "$f"; done) |
 		sha256 | { read -r h _ && echo "$h"; }
 }
@@ -209,7 +234,11 @@ fetch() {
 		curl -fsSL --connect-timeout 10 --max-time 60 -o "$2" "$1" </dev/null >&2 ||
 			{ err="downloading $1 failed (curl exit $?)" && return 1; }
 	elif command -v wget >/dev/null 2>&1; then
-		wget -q -T 15 -t 1 -O "$2" "$1" </dev/null >&2 ||
+		# wget's -T bounds each read, not the whole download: timeout does, where it exists.
+		limit=
+		command -v timeout >/dev/null 2>&1 && limit="timeout 60"
+		# shellcheck disable=SC2086 # $limit is a command and its argument, or nothing.
+		$limit wget -q -T 15 -t 1 -O "$2" "$1" </dev/null >&2 ||
 			{ err="downloading $1 failed (wget exit $?)" && return 1; }
 	else
 		err="no curl or wget to download $1"
@@ -217,20 +246,23 @@ fetch() {
 	fi
 }
 
-# Did a download fail in the last five minutes? Sets $msg to why it did.
-failed_recently() {
-	[ -f "$failed" ] && read -r t msg <"$failed" && now=$(date +%s) || return 1
+# recent FILE: does FILE record a failure from the last five minutes? Sets $msg to it.
+recent() {
+	[ -f "$1" ] && read -r t msg <"$1" && now=$(date +%s) || return 1
 	case $t in '' | *[!0-9]*) return 1 ;; esac
 	[ "$t" -le "$now" ] && [ $((now - t)) -lt 300 ]
 }
 
+# remember FILE WHY: records a failure, and when it happened, for recent.
+remember() { printf '%s %s\n' "$(date +%s)" "$2" >"$1" 2>/dev/null; }
+
 # download: fetches the release binary and installs it as $cached once verified. A
-# failure is remembered for five minutes, so an offline machine does not wait on
-# every call.
+# failure (to download it, or to verify it) is remembered for five minutes, so an
+# offline machine does not wait on every call.
 download() {
 	dir=${cached%/*}
 	failed=$dir/.failed
-	if failed_recently; then
+	if recent "$failed"; then
 		because "$msg (not retried for 5 minutes)"
 		return 1
 	fi
@@ -240,11 +272,16 @@ download() {
 	fi
 	if ! fetch "$REPO/releases/download/v$ver/$name" "$tmp"; then
 		rm -f "$tmp"
-		printf '%s %s\n' "$(date +%s)" "$err" >"$failed" 2>/dev/null
+		remember "$failed" "$err"
 		because "$err"
 		return 1
 	fi
-	verify "$tmp" || { rm -f "$tmp" && because "$err" && return 1; }
+	if ! verify "$tmp"; then
+		rm -f "$tmp"
+		remember "$failed" "$err"
+		because "$err"
+		return 1
+	fi
 	# rename(2) within a directory: a concurrent launcher sees the old file or the new.
 	mv -f "$tmp" "$cached" || { rm -f "$tmp" && because "cannot install $cached" && return 1; }
 	rm -f "$failed"
@@ -307,7 +344,7 @@ fi
 # --- nothing verified to run -----------------------------------------------------------
 
 # A hook outside a flow repo does nothing, so it does not download or build either.
-[ -z "$hook" ] || in_flow_repo || { cat >/dev/null 2>&1; exit 0; }
+[ -z "$hook" ] || hook_repo || exit 0
 
 # $name is set once there is a pinned release binary to run.
 name=
@@ -335,11 +372,11 @@ if [ -n "$name" ] && own_sources; then
 fi
 
 if [ -f "$root/Cargo.toml" ]; then
-	if have_cargo; then
+	if ! have_cargo; then
+		because "no cargo to build it from source"
+	elif ! held; then
 		note "$why; building it from source"
 		build && run "$dev" "$@"
-	else
-		because "no cargo to build it from source"
 	fi
 fi
 

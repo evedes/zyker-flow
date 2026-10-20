@@ -20,6 +20,6 @@ grep -q "^$want  source\$" "$tmp" || {
 	echo "pin-release: v$ver was released from other sources than this checkout" >&2
 	exit 1
 }
-cp "$tmp" SHA256SUMS
+cat "$tmp" >SHA256SUMS # not cp: mktemp made it 0600
 echo "pinned v$ver:"
 cat SHA256SUMS

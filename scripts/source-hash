@@ -1,12 +1,12 @@
 #!/bin/sh
 # Prints the hash of the sources a flow binary is built from: the SHA-256 of
-# `sha256sum` over src/, templates/, Cargo.toml and Cargo.lock, sorted by path. A
-# release records it as the `source` line of its SHA256SUMS; bin/flow computes the same
-# and runs a release binary only for the sources it was built from.
+# `sha256sum` over src/, templates/, Cargo.toml and Cargo.lock (dotfiles left out),
+# sorted by path. A release records it as the `source` line of its SHA256SUMS; bin/flow
+# computes the same and runs a release binary only for the sources it was built from.
 set -eu
 cd "$(dirname "$0")/.."
 sha256() {
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
-find src templates Cargo.toml Cargo.lock -type f | LC_ALL=C sort |
+find src templates Cargo.toml Cargo.lock -type f ! -path '*/.*' | LC_ALL=C sort |
 	while IFS= read -r f; do sha256 "$f"; done | sha256 | cut -d' ' -f1
