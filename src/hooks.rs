@@ -4,13 +4,14 @@ use crate::checks::check;
 use crate::config::{given, Phase};
 use crate::deploy::{self, run_list};
 use crate::error::{bail, Error, Result};
-use crate::paths::flow_cmd;
+use crate::paths::{flow_cmd, resolve};
 use crate::repo::{find_root, Repo};
 use crate::shell::{
-    absolute_words, bash_commands, commits_index_only, redirect_targets, without_discards,
-    GIT_COMMIT, GIT_PUSH, MUTATES, USER_ONLY, USER_ONLY_CMD,
+    absolute_words, bash_commands, commits_index_only, expand_tilde, redirect_targets,
+    without_discards, GIT_COMMIT, GIT_PUSH, MUTATES, USER_ONLY, USER_ONLY_CMD,
 };
 use serde_json::{json, Value};
+use std::env;
 use std::io;
 use std::path::PathBuf;
 
@@ -18,6 +19,30 @@ const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// The tools that run a shell `command` (Monitor streams its output as events).
 const SHELL_TOOLS: [&str; 2] = ["Bash", "Monitor"];
 const STATE_FILES: &str = "state files are written only by the flow CLI";
+const OWN_FILES: &str =
+    "flow's own files (its plugin and binary) change only by hand: tell the user what to change";
+
+/// flow's own files, which a session in a flow repo must not change: the plugin (the
+/// launcher's checkout, from $FLOW_SELF) and the directory of the binary running, unless
+/// the repo is inside them.
+fn own_dirs(repo: &Repo) -> Vec<PathBuf> {
+    let parent = |p: PathBuf| Some(resolve(&p).parent()?.to_path_buf());
+    let launcher = env::var_os("FLOW_SELF").filter(|s| !s.is_empty()).map(PathBuf::from);
+    let plugin = launcher.and_then(parent).and_then(parent);
+    let exe = env::current_exe().ok().and_then(parent);
+    let dirs = plugin.into_iter().chain(exe);
+    let root = resolve(&repo.root);
+    dirs.filter(|d| d.parent().is_some() && !root.starts_with(d)).collect()
+}
+
+/// Does `path` (absolute, `~/`, or relative to the root) resolve into one of `dirs`?
+fn is_own(repo: &Repo, dirs: &[PathBuf], path: &str) -> bool {
+    let Some(path) = expand_tilde(path).filter(|p| !p.contains('\0')) else {
+        return false;
+    };
+    let full = resolve(&repo.root.join(path));
+    dirs.iter().any(|d| full.starts_with(d))
+}
 
 /// Why the rules can't change now: a feature is active.
 fn rules_problem(repo: &Repo) -> Result<Option<String>> {
@@ -185,7 +210,11 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
             Some(p) => Some(p),
             None => field("notebook_path")?.filter(given),
         };
-        let Some(rel) = repo.rel(text(path, "file_path")?) else {
+        let file = text(path, "file_path")?;
+        if is_own(&repo, &own_dirs(&repo), file) {
+            return Ok(Some(OWN_FILES.into()));
+        }
+        let Some(rel) = repo.rel(file) else {
             return Ok(None);
         };
         if repo.is_state_file(&rel) {
@@ -217,18 +246,22 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
     let protected: Vec<String> = repo.protected.iter().map(|p| regex::escape(p)).collect();
     let names_code = (!protected.is_empty()).then(|| repo.names(&protected.join("|")));
     let names_code = names_code.transpose()?;
-    let (mut writes_state, mut writes_rules) = (false, false);
+    let own = own_dirs(&repo);
+    let (mut writes_state, mut writes_rules, mut writes_own) = (false, false, false);
     let (mut writes_code, mut codegen) = (false, false);
     for c in &cmds {
         let c = without_discards(c);
-        let targets: Vec<String> =
-            redirect_targets(&c).iter().filter_map(|t| repo.rel(t)).collect();
+        let redirects = redirect_targets(&c);
+        writes_own |= redirects.iter().any(|t| is_own(&repo, &own, t));
+        let targets: Vec<String> = redirects.iter().filter_map(|t| repo.rel(t)).collect();
         writes_state |= targets.iter().any(|t| repo.is_state_file(t));
         writes_rules |= targets.iter().any(|t| repo.is_rule_file(t));
         writes_code |= targets.iter().any(|t| repo.is_protected(t));
         if MUTATES.is_match(&c) {
             // An absolute path names what it resolves to, symlinks and all.
-            let abs: Vec<String> = absolute_words(&c).iter().filter_map(|w| repo.rel(w)).collect();
+            let words = absolute_words(&c);
+            writes_own |= words.iter().any(|w| is_own(&repo, &own, w));
+            let abs: Vec<String> = words.iter().filter_map(|w| repo.rel(w)).collect();
             writes_state |= names_state.is_match(&c) || abs.iter().any(|r| repo.is_state_file(r));
             writes_rules |= names_rules.is_match(&c) || abs.iter().any(|r| repo.is_rule_file(r));
             let code = names_code.as_ref().is_some_and(|re| re.is_match(&c));
@@ -238,6 +271,9 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
     }
     if writes_state {
         return Ok(Some(STATE_FILES.into()));
+    }
+    if writes_own {
+        return Ok(Some(OWN_FILES.into()));
     }
     if writes_rules {
         if let Some(problem) = rules_problem(&repo)? {

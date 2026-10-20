@@ -2,6 +2,7 @@
 //! delegated to it, on a brief flow fixes (src/judge.md) and the gate's artifacts.
 
 use crate::config::{Phase, State};
+use crate::deploy::finish;
 use crate::error::{bail, Error, Result};
 use crate::markdown::Sections;
 use crate::paths::{file_name, read_text};
@@ -10,6 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::Write as _;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// The gates the user can delegate to the judge.
 pub const GATES: [Phase; 3] = [Phase::Spec, Phase::Tickets, Phase::Review];
@@ -20,6 +22,9 @@ const MAX_DIFF: usize = 200_000;
 const BRIEF: &str = include_str!("judge.md");
 /// The judge reads; it never writes or runs anything.
 const TOOLS: &str = "Read,Grep,Glob";
+/// How long a run may take by default: inside the Bash tool's ten-minute limit, so the
+/// agent's call ends with flow's error rather than the tool's.
+const TIMEOUT_SECS: u64 = 540;
 
 pub const VERDICTS: [&str; 3] = ["approve", "reject", "ask-user"];
 
@@ -111,6 +116,10 @@ pub fn ask(repo: &Repo, prompt: &str) -> Result<Verdict> {
     let mut c = Command::new("claude");
     c.args(["-p", "--output-format", "json", "--no-session-persistence"]);
     c.args(["--tools", TOOLS, "--allowedTools", TOOLS, "--json-schema", &schema().to_string()]);
+    // Nothing but those tools: no MCP servers, skills or permission mode of the user's,
+    // and none of the repo's own settings (hooks, permissions), which the agent can write.
+    c.args(["--strict-mcp-config", "--disable-slash-commands", "--permission-mode", "dontAsk"]);
+    c.args(["--setting-sources", "user"]);
     if let Some(model) = &repo.config.judge.model {
         c.args(["--model", model]);
     }
@@ -123,13 +132,16 @@ pub fn ask(repo: &Repo, prompt: &str) -> Result<Verdict> {
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes())?;
     }
-    let out = child.wait_with_output()?;
-    let reply: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
-        let stdout = String::from_utf8_lossy(&out.stdout);
+    let secs = repo.config.judge.timeout_secs.unwrap_or(TIMEOUT_SECS);
+    let Some((status, [stdout, _])) = finish(child, Duration::from_secs(secs))? else {
+        bail!("the judge took longer than {secs} seconds; nothing recorded");
+    };
+    let reply: Value = serde_json::from_slice(&stdout).map_err(|e| {
+        let stdout = String::from_utf8_lossy(&stdout);
         Error(format!("the judge's reply is not JSON ({e}): {}", stdout.trim()))
     })?;
     let failed = reply.get("is_error").and_then(Value::as_bool) != Some(false);
-    if failed || !out.status.success() {
+    if failed || !status.success() {
         let what = reply.get("subtype").and_then(Value::as_str).unwrap_or("error");
         let result = reply.get("result").and_then(Value::as_str).unwrap_or("");
         bail!("the judge failed ({what}): {}", result.trim());

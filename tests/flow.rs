@@ -578,7 +578,8 @@ impl Judge {
         let claude = dir.path().join("claude");
         write(
             &claude,
-            "#!/bin/sh\necho \"$@\" > \"$0.args\"\ncat > \"$0.prompt\"\ncat \"$0.json\"\n",
+            "#!/bin/sh\necho \"$@\" > \"$0.args\"\ncat > \"$0.prompt\"\n\
+             [ -f \"$0.slow\" ] && sleep 5\ncat \"$0.json\"\n",
         );
         chmod_x(&claude);
         t.set_env("PATH", path_with(dir.path()));
@@ -634,6 +635,9 @@ fn the_judge_passes_only_what_the_user_delegated() {
     let args = judge.file("args");
     assert_in("-p --output-format json --no-session-persistence", &args);
     assert_in("--tools Read,Grep,Glob --allowedTools Read,Grep,Glob --json-schema", &args);
+    let locked = "--strict-mcp-config --disable-slash-commands --permission-mode dontAsk \
+                  --setting-sources user";
+    assert_in(locked, &args);
     let prompt = judge.file("prompt");
     assert_in("delegated to you their approval of its spec", &prompt);
     assert_in("<artifact path=\"work/001-hello/spec.md\">\n# Spec: x", &prompt);
@@ -702,6 +706,12 @@ fn the_judge_asks_the_user_and_fails_closed() {
     assert_in("the judge's reply is not JSON", &t.flow_any(&["judge"]).stderr);
     judge.replies(r#"{"is_error":false,"structured_output":{"verdict":"yes","summary":""}}"#);
     assert_in("\"yes\" is not one of approve, reject, ask-user", &t.flow_any(&["judge"]).stderr);
+    judge.says("approve", "Too late.", &[]);
+    write(&judge.dir.path().join("claude.slow"), "");
+    t.configure(json!({"judge": {"timeout_secs": 1}}));
+    let slow = t.flow_any(&["judge"]);
+    assert_in("the judge took longer than 1 seconds; nothing recorded", &slow.stderr);
+    fs::remove_file(judge.dir.path().join("claude.slow")).unwrap();
     assert_eq!(t.state()["judgements"].as_array().unwrap().len(), 1);
     assert!(t.state()["approvals"]["spec"].is_null());
     t.fwrite("spec.md", &SPEC.replace("Goodbyes.", "TODO(flow): later"));
@@ -866,6 +876,34 @@ fn paths_name_code_only_inside_the_repo() {
     for c in ["cp README.md /tmp/lib/README.md", "rm /x/mix.exs", "rm mix.exs.bak"] {
         assert_eq!(t.bash(c), None, "{c}");
     }
+}
+
+#[test]
+fn flows_own_files_change_only_by_hand() {
+    let mut t = Flow::new();
+    t.flow(&["new", "hello"]);
+    // The plugin is the launcher's checkout: this one under bin/flow, else a stand-in.
+    let stand_in = TempDir::new();
+    let plugin = if testing_launcher() {
+        checkout("")
+    } else {
+        write(&stand_in.path().join("bin/flow"), "#!/bin/sh\n");
+        t.set_env("FLOW_SELF", stand_in.path().join("bin/flow"));
+        stand_in.path().to_path_buf()
+    };
+    let p = plugin.join("src/hooks.rs").display().to_string();
+    let own = "flow's own files (its plugin and binary) change only by hand";
+    assert_in(own, &denied(t.hook("Edit", json!({"file_path": p}))));
+    assert_in(own, &denied(t.bash(&format!("echo x > {p}"))));
+    assert_in(own, &denied(t.bash(&format!("rm -rf {}", plugin.display()))));
+    let bin = flow_bin().display().to_string();
+    assert_in(own, &denied(t.bash(&format!("cp /tmp/old {bin}"))));
+    assert_in(own, &denied(t.hook("Write", json!({"file_path": bin}))));
+    t.flow(&["pause"]);
+    assert_in(own, &denied(t.hook("Edit", json!({"file_path": p}))));
+    // Reading them, and writing elsewhere outside the repo, is fine.
+    assert_eq!(t.bash(&format!("cat {p} > /tmp/flow-hooks.rs")), None);
+    assert_eq!(t.hook("Write", json!({"file_path": "/tmp/flow-notes.md"})), None);
 }
 
 #[test]

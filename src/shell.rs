@@ -129,16 +129,19 @@ pub fn bash_commands(cmd: &str) -> Vec<String> {
 /// A word that is an absolute path, or one under `~`.
 static ABSOLUTE: LazyLock<Regex> = regex!(r#"(?:^|[\s\x1c-\x1f'"=])(~?/[^\s\x1c-\x1f'";&|()<>]*)"#);
 
+/// `word` with a leading `~/` expanded from $HOME; None when $HOME is not absolute.
+pub fn expand_tilde(word: &str) -> Option<String> {
+    let Some(rest) = word.strip_prefix('~').filter(|r| r.is_empty() || r.starts_with('/')) else {
+        return Some(word.to_string());
+    };
+    let home = std::env::var("HOME").ok().filter(|h| h.starts_with('/'))?;
+    Some(format!("{}{rest}", home.trim_end_matches('/')))
+}
+
 /// The absolute paths a simple command names, `~` expanded from $HOME (when absolute).
 pub fn absolute_words(cmd: &str) -> Vec<String> {
-    let home = std::env::var("HOME").ok().filter(|h| h.starts_with('/'));
     let words = ABSOLUTE.captures_iter(cmd).map(|m| m[1].to_string());
-    let expand = |w: String| match (w.strip_prefix('~'), &home) {
-        (Some(rest), Some(home)) => Some(format!("{}{rest}", home.trim_end_matches('/'))),
-        (Some(_), None) => None,
-        (None, _) => Some(w),
-    };
-    words.filter_map(expand).collect()
+    words.filter_map(|w| expand_tilde(&w)).collect()
 }
 
 /// `git commit` options that take a value, and those that commit more than the index.

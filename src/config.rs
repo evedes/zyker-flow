@@ -75,6 +75,8 @@ pub struct Deploy {
 pub struct Judge {
     pub model: Option<String>,
     pub max_budget_usd: Option<f64>,
+    /// How long a run may take, in seconds.
+    pub timeout_secs: Option<u64>,
     /// As in [`Config`]: an object only.
     #[serde(flatten)]
     _rest: Extra,

@@ -32,14 +32,16 @@ default; `<work>` below).
 | `flow delegate <gates>` / `off` | **user only** | let the judge pass spec, tickets or review for this feature |
 | `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
 
-Never run the user-only commands, and never edit `<work>/flow.json` or
-`<work>/*/state.json`: the hooks deny both. When you need an approval, say so
+Never run the user-only commands, never edit `<work>/flow.json` or
+`<work>/*/state.json`, and never change flow itself (the plugin's files or its
+binary, even when a flow hook seems wrong): the hooks deny all three. When you need an approval, say so
 and ask the user to run `! flow approve <kind>`, unless `flow status` lists the
 gate under "delegated to the judge": then run `flow judge` (see below).
 
 `.flow.json`, `.claude/settings.json`, `.claude/settings.local.json`,
-`<work>/templates/`, `<work>/STANDING.md` and `<work>/specs/` set the rules. While a feature is active the hooks deny editing them; propose the
-change and let the user make it. If a hook denies with
+`<work>/templates/`, `<work>/STANDING.md` and `<work>/specs/` set the rules.
+While a feature is active the hooks deny editing them; propose the change and
+let the user make it. If a hook denies with
 `hook error: …`, don't work around it: tell the user (usually `.flow.json` is
 invalid and needs fixing by hand). A `hook error:` about the payload (a lone
 surrogate, `expected value at line …`) means flow could not read the tool

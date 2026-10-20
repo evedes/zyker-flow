@@ -8,7 +8,7 @@ use std::fmt::Display;
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -190,28 +190,38 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
     })
 }
 
-/// Runs `cmd` in `root` for at most 30 seconds (until it exits and closes its output)
-/// and parses its stdout as JSON.
-fn run_json(mut cmd: Command, root: &Path, what: &str) -> Result<Value> {
-    let fail = |e: &dyn Display| Error(format!("{what} failed: {e}"));
-    cmd.current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| fail(&e))?;
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
+/// Waits for `child` for at most `timeout` (until it exits and closes its output): its
+/// status, stdout and stderr (empty when not piped), or None once it was killed for
+/// taking longer.
+pub fn finish(mut child: Child, timeout: Duration) -> Result<Option<(ExitStatus, [Vec<u8>; 2])>> {
+    let deadline = Instant::now() + timeout;
     let pipes = [drain(child.stdout.take()), drain(child.stderr.take())];
     let status = loop {
         if pipes.iter().all(JoinHandle::is_finished) {
-            if let Some(status) = child.try_wait().map_err(|e| fail(&e))? {
+            if let Some(status) = child.try_wait()? {
                 break status;
             }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(fail(&format!("timed out after {} seconds", COMMAND_TIMEOUT.as_secs())));
+            return Ok(None);
         }
         thread::sleep(Duration::from_millis(5));
     };
-    let [stdout, stderr] = pipes.map(|h| h.join().unwrap_or_default());
+    Ok(Some((status, pipes.map(|h| h.join().unwrap_or_default()))))
+}
+
+/// Runs `cmd` in `root` for at most 30 seconds (until it exits and closes its output)
+/// and parses its stdout as JSON.
+fn run_json(mut cmd: Command, root: &Path, what: &str) -> Result<Value> {
+    let fail = |e: &dyn Display| Error(format!("{what} failed: {e}"));
+    cmd.current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd.spawn().map_err(|e| fail(&e))?;
+    let Some((status, [stdout, stderr])) = finish(child, COMMAND_TIMEOUT).map_err(|e| fail(&e))?
+    else {
+        return Err(fail(&format!("timed out after {} seconds", COMMAND_TIMEOUT.as_secs())));
+    };
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
         let stderr: String = stderr.trim().chars().take(200).collect();

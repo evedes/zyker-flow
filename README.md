@@ -25,6 +25,7 @@ nothing.
 | The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply | CLI |
 | A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
 | The agent can't run `approve`, `delegate`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
+| The agent can't change flow itself: the plugin's checkout (from `$FLOW_SELF`) and the directory of the binary running, from a session in a flow repo, paused or not | hook |
 
 Changes that touch no protected path (docs, CI, tooling) are never blocked
 from being made. They do count towards the gates, though: the fingerprint
@@ -103,7 +104,7 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
 | `flow approve spec\|tickets\|review` | user | approve the current artifact (only in its own phase, and only when it is complete); review approves the code as it is now |
 | `flow delegate spec\|tickets\|review…`, `flow delegate off` | user | let the judge pass those gates for the active feature, or stop it (see [The judge](#the-judge)) |
 | `flow judge` | agent | in a delegated spec, tickets or review: run the judge on it and record its verdict |
-| `flow pause`, `flow resume` | user | suspend or restore enforcement (state files stay protected) |
+| `flow pause`, `flow resume` | user | suspend or restore enforcement (state files, rule files and flow's own files stay protected) |
 | `flow abandon` | user | drop the active feature (its folder stays, phase `abandoned`; also clears an active feature whose folder is gone) |
 
 The user runs their commands with the `!` prefix in Claude Code (e.g.
@@ -141,7 +142,7 @@ else its path (see [The flow binary](#the-flow-binary)).
 | `standing_gates` | shell commands `flow gates` runs at the git root, before every ticket's verification commands |
 | `codegen` | regexes ([fancy-regex](https://docs.rs/fancy-regex) syntax) for commands that write code without naming the files (generators, formatters); each is searched for in one simple command at a time |
 | `deploy` | optional; without it the push check and the ship→done CI check are skipped |
-| `judge` | optional: `model` and `max_budget_usd` for `flow judge` (see [The judge](#the-judge)) |
+| `judge` | optional: `model`, `max_budget_usd` and `timeout_secs` for `flow judge` (see [The judge](#the-judge)) |
 
 `flow init` fills in `protected_paths`, `standing_gates` and `codegen` for
 Elixir (`mix.exs`), Rust (`Cargo.toml`), Python (`pyproject.toml`) and Node
@@ -223,7 +224,11 @@ back. The user's own `flow approve` keeps working either way.
 
 `flow judge`, which the agent runs once the gate's artifact is complete, starts
 a fresh, read-only Claude: `claude -p` with only the Read, Grep and Glob tools,
-no session kept, and a structured-output schema. Its prompt is flow's own brief
+no session kept, and a structured-output schema. It loads no MCP servers
+(`--strict-mcp-config`), skills or commands (`--disable-slash-commands`), and
+only the user's settings (`--setting-sources user`: not the repo's hooks,
+permissions or CLAUDE.md, which the brief has it read as data instead), and is denied any tool not allowed up front (`--permission-mode
+dontAsk`), whatever the user's default mode. Its prompt is flow's own brief
 (`src/judge.md`, compiled in, not overridable) with the gate's criteria and its
 artifacts: research and spec for spec; spec, tickets and `STANDING.md` for
 tickets; those plus the gate results, `git diff HEAD` (cut at 200 kB) and the
@@ -247,11 +252,12 @@ judge hands it back: the user approves it, or delegates it again for three more
 tries. In a delegated review, flow writes the verdict into `review.md` as the
 record, and only an approval (the judge's or the user's) of the current code
 lets review end. A run that fails (no `claude`, an error, the budget spent, a
-reply without a verdict) records nothing, and neither does one during which the
+reply without a verdict, no reply within the time limit) records nothing, and neither does one during which the
 artifact changed.
 
-`.flow.json`'s optional `judge` section sets `model` (passed as `--model`) and
-`max_budget_usd` (`--max-budget-usd`). A run takes minutes (one on Haiku took
+`.flow.json`'s optional `judge` section sets `model` (passed as `--model`),
+`max_budget_usd` (`--max-budget-usd`) and `timeout_secs` (540 by default:
+inside the Bash tool's ten-minute limit, after which the judge is killed). A run takes minutes (one on Haiku took
 about 45 s) and is billed to the user's Claude account.
 
 ## The living spec
@@ -455,7 +461,8 @@ first release is pinned, bin/flow builds flow from source everywhere.
 Open defects, found in the 2026-10-18 review; each needs a fix and a test.
 
 - With no feature active, the agent can edit `.flow.json`,
-  `<work_dir>/templates/`, `STANDING.md` and `<work_dir>/specs/`: rules changed
+  `.claude/settings*.json`, `<work_dir>/templates/`, `STANDING.md` and
+  `<work_dir>/specs/`: rules changed
   before `flow new` (and before a `flow delegate`) are the ones the feature runs
   under.
 - `flow judge` runs the `claude` on the agent's PATH, so an agent that changes
@@ -471,6 +478,10 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
   not that the reviewed code is what was committed.
 - Only `git commit` (and `commit-tree`) is gated; `merge`, `cherry-pick`,
   `revert`, `am`, `rebase` and `pull` are not.
+- flow's own files are guarded where a path names them (an absolute or `~/`
+  path, a redirect target, an Edit/Write path), not behind a `cd`; and the
+  user's own Claude Code settings (`~/.claude/settings.json`, `claude plugin
+  disable`), which can turn the plugin off, are not guarded at all.
 - Bash write detection misses `&>`/`&>>` and `>|` redirects, git commands that
   rewrite code without naming it (`git restore .`, `git reset --hard`), and
   `cd dir && …` into a
