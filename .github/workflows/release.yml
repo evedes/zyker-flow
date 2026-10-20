@@ -4,28 +4,45 @@
 # until every binary and SHA256SUMS are attached, and a published release is never
 # changed. bin/flow trusts only the SHA256SUMS committed next to VERSION:
 # scripts/pin-release copies this one there (see README, "Releasing").
+#
+# The builds run without write access: they hand their binaries on as artifacts, and
+# only `publish` attaches them, the ones SHA256SUMS was computed from, and only to a
+# draft. Run by hand (workflow_dispatch) on a branch, it is a dry run: everything but
+# `draft` and `publish`, the result kept as the `release` artifact.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+# Two runs for one tag (a tag deleted and pushed again) never interleave.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   RUST_TOOLCHAIN: "1.95.0"
   CARGO_ZIGBUILD_VERSION: "0.22.3"
   ZIG_VERSION: "0.15.2"
-  GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
   TAG: ${{ github.ref_name }}
 
 jobs:
   draft:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: Tag matches VERSION and Cargo.toml
         run: |
           want="v$(cat VERSION)"
@@ -51,12 +68,16 @@ jobs:
 
   linux:
     needs: draft
+    # Also when draft is skipped (a dry run), not when it failed.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       # Checks the tarball's minisign signature against the Zig Software Foundation's key.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
@@ -76,17 +97,24 @@ jobs:
           file "$bin" | grep -q 'statically linked'
           if [ ${{ matrix.target }} = x86_64-unknown-linux-musl ]; then "$bin" >/dev/null; fi
           mkdir dist && cp "$bin" dist/flow-${{ matrix.target }}
-      - name: Upload
-        run: gh release upload "$TAG" dist/flow-${{ matrix.target }} --clobber
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flow-${{ matrix.target }}
+          path: dist/flow-${{ matrix.target }}
+          if-no-files-found: error
+          overwrite: true
 
   macos:
     needs: draft
+    if: ${{ !failure() && !cancelled() }}
     runs-on: macos-latest
     strategy:
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
@@ -100,25 +128,66 @@ jobs:
           file "$bin"
           if [ "$(uname -m)" = arm64 ] && [ ${{ matrix.target }} = aarch64-apple-darwin ]; then "$bin" >/dev/null; fi
           mkdir dist && cp "$bin" dist/flow-${{ matrix.target }}
-      - name: Upload
-        run: gh release upload "$TAG" dist/flow-${{ matrix.target }} --clobber
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flow-${{ matrix.target }}
+          path: dist/flow-${{ matrix.target }}
+          if-no-files-found: error
+          overwrite: true
 
-  publish:
+  # SHA256SUMS of this run's four binaries and of the sources, with the binaries, as the
+  # `release` artifact.
+  sums:
     needs: [linux, macos]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - name: SHA256SUMS of the uploaded binaries and the sources
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: flow-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
         run: |
           source=$(scripts/source-hash)
-          mkdir dist && cd dist
-          gh release download "$TAG" --pattern 'flow-*'
+          cd dist
           for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
-            [ -f "flow-$t" ] || { echo "::error::flow-$t missing from the release"; exit 1; }
+            [ -f "flow-$t" ] || { echo "::error::flow-$t was not built"; exit 1; }
           done
+          [ "$(ls | wc -l)" -eq 4 ] || { echo "::error::unexpected files: $(ls)"; exit 1; }
           sha256sum flow-* >SHA256SUMS
           echo "$source  source" >>SHA256SUMS
           cat SHA256SUMS
-          gh release upload "$TAG" SHA256SUMS --clobber
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    needs: sums
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist
+      # A job re-run after the release went out must not change it.
+      - name: Attach to the draft
+        run: |
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]; then
+            echo "::error::$TAG is already published; release a new version instead"
+            exit 1
+          fi
+          gh release upload "$TAG" dist/flow-* dist/SHA256SUMS --clobber
       - name: Publish
         run: gh release edit "$TAG" --draft=false --latest

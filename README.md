@@ -326,7 +326,7 @@ In the plugin:
 | `bin/flow` | the launcher (POSIX sh): finds or fetches the flow binary and runs it (see [The flow binary](#the-flow-binary)) |
 | `src/`, `Cargo.toml`, `Cargo.lock` | the CLI and both hooks, in Rust (one binary, `flow`; `templates/` are compiled in): `main.rs` dispatches, `commands.rs` and `hooks.rs` are the entry points, `checks.rs` what each phase needs, `shell.rs` reads Bash commands, `markdown.rs` the artifacts, `specs.rs` the living spec, `judge.rs` `flow judge` (its brief in `judge.md`), `config.rs` the JSON files, `repo.rs` the repo and its fingerprints, `deploy.rs` CI runs and the health check, `paths.rs` and `error.rs` the rest |
 | `rustfmt.toml` | `cargo fmt` settings |
-| `.github/workflows/` | `ci.yml` (fmt, clippy and every test suite on Linux and macOS; the release pin on main) and `release.yml` (the four release binaries) |
+| `.github/workflows/` | `ci.yml` (fmt, clippy, the release build and every test suite on Linux and macOS, the build on the minimum Rust; the release pin on main and on pull requests into it) and `release.yml` (the four release binaries; run by hand, a dry run) |
 | `VERSION`, `SHA256SUMS` | the release bin/flow runs, and its pinned checksums (see [Releasing](#releasing)) |
 | `hooks/hooks.json` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit\|Bash\|Monitor`, and `SessionStart` |
 | `skills/flow/SKILL.md` | how the agent runs each phase |
@@ -450,13 +450,17 @@ A release is what bin/flow runs for everyone without a build of their own, so
    version, commit, and push the tag `v<VERSION>` for that commit (not main).
    `.github/workflows/release.yml` builds the four binaries and publishes them
    with `SHA256SUMS`, whose `source` line is the hash of the tagged sources.
-   A published release is never changed; a fix needs a new version.
+   The builds have no write access: `publish` attaches the binaries it hashed,
+   only while the release is a draft. A published release is never changed; a
+   fix needs a new version. To try the workflow first, `gh workflow run
+   release.yml --ref <branch>` runs it without a release, keeping the binaries
+   and `SHA256SUMS` as the run's `release` artifact.
 2. `scripts/pin-release` copies that `SHA256SUMS` into the repo, after
    checking it lists all four binaries and this checkout's sources. Commit it,
    and merge the branch into main.
 
-On main, CI checks that `VERSION`, `Cargo.toml` and `SHA256SUMS` agree with
-the published release, and warns when `src/`, `templates/` or `Cargo.*` have
+On main, and on a pull request into it, CI checks that `VERSION`,
+`Cargo.toml` and `SHA256SUMS` agree with the published release, and warns when `src/`, `templates/` or `Cargo.*` have
 changed since (users without cargo then run the older release). Until the
 first release is pinned, bin/flow builds flow from source everywhere.
 

@@ -16,6 +16,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Rust toolchain
         run: |
@@ -24,6 +26,8 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # What bin/flow runs in every hook: it must build, or the hooks keep the old one.
+      - run: cargo build --release --locked
       # /bin/sh is dash on ubuntu and bash on macOS; the launcher suite runs again under
       # bash on ubuntu and zsh on macOS.
       - run: cargo test --locked
@@ -34,14 +38,32 @@ jobs:
         if: runner.os == 'Linux'
         run: shellcheck -s sh bin/flow scripts/smoke scripts/source-hash scripts/pin-release
 
+  # Cargo.toml's rust-version: README promises builds from source on Rust 1.85.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+      - run: cargo build --release --locked
+      - run: cargo test --locked --no-run
+
   # bin/flow runs the release binary SHA256SUMS pins, and only for the sources it was
   # built from: on main, VERSION, Cargo.toml, SHA256SUMS and the published release must
   # agree (see README, "Releasing").
   release-pin:
-    if: github.ref == 'refs/heads/main'
+    # On main, and on a pull request into it, before it merges.
+    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: VERSION, Cargo.toml and the pinned release agree
         run: |
           ver=$(cat VERSION)
