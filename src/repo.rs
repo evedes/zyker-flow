@@ -195,11 +195,16 @@ impl Repo {
     /// A regex for a Bash word naming one of `alts` (repo-relative paths, as regex): as
     /// written, or after `./` or `$PWD/`, and ending there or at a `/`. So `/tmp/lib/x`
     /// doesn't name `lib/`, nor `src-old` `src`. Absolute words are resolved instead (see
-    /// [`crate::shell::absolute_words`]).
+    /// [`crate::shell::absolute_words`]). After `=` it is a path as an option's value
+    /// (`--target=lib`) or when it goes on with `/` (`x=lib/y`); `MIX_ENV=test` is a
+    /// value, not `test/`.
     pub fn names(&self, alts: &str) -> Result<regex::Regex> {
         let prefix = r"\./|\$PWD/|\$\{PWD\}/|\$\(pwd\)/";
         let space = r"\s\x1c-\x1f";
-        let re = format!(r#"(?:^|[{space}'"=])(?:{prefix})*(?:{alts})(?:[/*?{space}'";&|()<>]|$)"#);
+        let path = format!(r#"(?:{prefix})*(?:{alts})(?:[/*?{space}'";&|()<>]|$)"#);
+        let start = format!(r#"(?:^|[{space}'"])"#);
+        let option = format!(r#"{start}-[^{space}'"=]*="#);
+        let re = format!(r"{start}{path}|{option}{path}|=(?:{prefix})*(?:{alts})/");
         Ok(regex::Regex::new(&re)?)
     }
 

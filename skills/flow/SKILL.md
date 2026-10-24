@@ -115,7 +115,10 @@ with one is missing or empty.
    CI is green for HEAD and the health check returns 200. Without one, ship
    ends once everything is committed. Moving to done rewrites `state.json` and
    merges the spec changes into `<work>/specs/`, so commit the `<work>` folder
-   once more afterwards.
+   once more afterwards. When CI fails, find the cause with the CI's own
+   tooling (its job logs, or the failing step run locally), then `flow back`
+   to build to fix it; a fix the approved tickets don't cover goes back to
+   tickets (or spec) for a new one first.
 
 Work that touches no protected path (docs, CI, tooling) needs no feature. To
 commit it mid-feature, stage it and run a plain `git commit -m '<message>'`

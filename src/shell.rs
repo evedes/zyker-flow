@@ -18,11 +18,12 @@ static CAT_READER: LazyLock<Regex> = regex!(r"^(?:\w+=\S*\s+)*cat\b");
 /// The rest of the line pipes the command's output on (`| sh`, `|& sh`, not `||`).
 static PIPED: LazyLock<Regex> = regex!(r"^[^;&|]*\|(?:[^|]|$)");
 static DISCARD: LazyLock<Regex> = regex!(r"\d*>[\s\x1c-\x1f]*/dev/null|\d*>&\d");
-/// A tool that writes the paths it names.
+/// A tool that writes the paths it names. No word character or `-` touches its name, so
+/// an option (`docker run --rm`) or another tool (`rm-cache`) is not it.
 pub static MUTATES: LazyLock<Regex> = regex!(concat!(
-    r"\btee\b|\bsed\s+(-\S*\s+)*-i|\bperl\s+(-\S*\s+)*-i|\brm\b|\bmv\b|\bcp\b|",
-    r"\btouch\b|\btruncate\b|\bpatch\b|\bln\b|",
-    r"\bgit\s+(checkout|restore|apply|stash|reset|mv|rm)\b"
+    r"(?:^|[^\w-])(?:(?:tee|rm|mv|cp|touch|truncate|patch|ln)(?:[^\w-]|$)|",
+    r"sed\s+(-\S*\s+)*-i|perl\s+(-\S*\s+)*-i|",
+    r"git\s+(checkout|restore|apply|stash|reset|mv|rm)\b)"
 ));
 /// git's options before the subcommand: any `-x` or `--x` word, and the next word after
 /// the ones that take it as their value.
