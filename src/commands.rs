@@ -2,8 +2,8 @@
 
 use crate::checks::{check, stale_approvals};
 use crate::config::{
-    now, read_json, write_json, Approval, Delegation, Event, Extra, GateResult, Gates, Judgement,
-    Phase, State,
+    default_work_dir, now, read_json, write_json, Approval, Delegation, Event, Extra, GateResult,
+    Gates, Judgement, Phase, State,
 };
 use crate::deploy::{self, exit_code};
 use crate::error::{bail, Error, Result};
@@ -517,7 +517,7 @@ pub fn init(root: &Path) -> Result<i32> {
     let (marker, protected, gates, codegen) =
         STACKS.into_iter().find(|s| root.join(s.0).is_file()).unwrap_or(("", &["src/"], &[], &[]));
     let config = json!({
-        "work_dir": "work", "protected_paths": protected, "standing_gates": gates, "codegen": codegen,
+        "work_dir": default_work_dir(), "protected_paths": protected, "standing_gates": gates, "codegen": codegen,
     });
     write_json(&root.join(".flow.json"), &config)?;
     let repo = Repo::open(root)?;

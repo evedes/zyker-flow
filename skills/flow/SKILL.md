@@ -16,7 +16,7 @@ explore -> spec -> tickets -> build -> review -> ship -> done
 ```
 
 Run the CLI as `flow` (the plugin puts it on PATH). The repo's `.flow.json`
-sets the protected paths, standing gates and work dir (`work_dir`, `work` by
+sets the protected paths, standing gates and work dir (`work_dir`, `flow` by
 default; `<work>` below).
 
 | Command | Who | What |

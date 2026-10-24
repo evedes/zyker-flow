@@ -143,6 +143,23 @@ fn state_files_and_user_commands_are_protected() {
 }
 
 #[test]
+fn work_dir_defaults_to_flow() {
+    let t = Flow::new();
+    let mut cfg = parse(&t.read(".flow.json"));
+    cfg.as_object_mut().unwrap().remove("work_dir");
+    t.write(".flow.json", cfg.to_string());
+    t.flow(&["new", "hello"]);
+    assert!(t.path("flow/001-hello/state.json").is_file());
+    assert_in("state files", &denied(t.edit("flow/flow.json")));
+    assert_in("state files", &denied(t.bash("rm flow/001-hello/state.json")));
+    assert_in("rules", &denied(t.bash("echo x >> flow/STANDING.md")));
+    // The binary shares the directory's name; running or copying it names no state.
+    for c in ["flow status", "cp bin/flow /tmp/flow && flow status", "rm -rf /tmp/flow"] {
+        assert_eq!(t.bash(c), None, "{c}");
+    }
+}
+
+#[test]
 fn bash_writes_to_code_follow_the_phase() {
     let t = Flow::new();
     t.flow(&["new", "hello"]);
@@ -336,12 +353,12 @@ fn init_opts_a_repo_in() {
     assert!(strings(&cfg["protected_paths"]).contains(&"lib/"));
     assert!(strings(&cfg["standing_gates"]).contains(&"mix test"));
     let name = t.root.file_name().unwrap().to_str().unwrap();
-    assert_in(name, &t.read("work/STANDING.md"));
+    assert_in(name, &t.read("flow/STANDING.md"));
     let settings = parse(&t.read(".claude/settings.json"));
     let deny = strings(&settings["permissions"]["deny"]);
     let approve_rules = deny.iter().filter(|r| **r == "Bash(flow approve:*)");
     assert_eq!(approve_rules.count(), 1);
-    for rule in ["Bash(rm -rf:*)", "Bash(flow abandon:*)", "Edit(work/*/state.json)"] {
+    for rule in ["Bash(rm -rf:*)", "Bash(flow abandon:*)", "Edit(flow/*/state.json)"] {
         assert!(deny.contains(&rule), "{rule} not in {deny:?}");
     }
     assert!(!deny.iter().any(|r| r.starts_with("Write(")), "{deny:?}");
@@ -1191,8 +1208,8 @@ fn init_writes_settings_and_config_json() {
     let r = t.flow(&["init"]);
     assert_eq!(
         r.stdout,
-        "wrote .flow.json (defaults for mix.exs), work/STANDING.md and deny rules in .claude/settings.json\n\
-         next: check protected_paths, standing_gates and codegen in .flow.json, fill in work/STANDING.md, \
+        "wrote .flow.json (defaults for mix.exs), flow/STANDING.md and deny rules in .claude/settings.json\n\
+         next: check protected_paths, standing_gates and codegen in .flow.json, fill in flow/STANDING.md, \
          and add a deploy section if ship should wait for CI\n"
     );
     // Every key kept; the deny rules added after the existing ones.
@@ -1203,8 +1220,8 @@ fn init_writes_settings_and_config_json() {
         "Bash(flow pause:*)",
         "Bash(flow resume:*)",
         "Bash(flow abandon:*)",
-        "Edit(work/flow.json)",
-        "Edit(work/*/state.json)",
+        "Edit(flow/flow.json)",
+        "Edit(flow/*/state.json)",
     ]);
     let written = t.read(".claude/settings.json");
     assert_eq!(parse(&written), want);
@@ -1212,7 +1229,7 @@ fn init_writes_settings_and_config_json() {
     assert_eq!(
         t.read(".flow.json"),
         r#"{
-  "work_dir": "work",
+  "work_dir": "flow",
   "protected_paths": [
     "lib/",
     "test/",
@@ -1238,8 +1255,8 @@ fn init_writes_settings_and_config_json() {
     let template = read(&checkout("templates/STANDING.md"));
     let name = t.root.file_name().unwrap().to_str().unwrap();
     assert_eq!(
-        t.read("work/STANDING.md"),
-        template.replace("{project}", name).replace("{work_dir}", "work")
+        t.read("flow/STANDING.md"),
+        template.replace("{project}", name).replace("{work_dir}", "flow")
     );
 
     // No known stack, no settings yet; a settings file that is not JSON stops init.
@@ -1255,7 +1272,7 @@ fn init_writes_settings_and_config_json() {
     assert_in("(no known stack: guessed)", &u.flow(&["init"]).stdout);
     assert_eq!(
         u.read(".flow.json"),
-        "{\n  \"work_dir\": \"work\",\n  \"protected_paths\": [\n    \"src/\"\n  ],\n  \
+        "{\n  \"work_dir\": \"flow\",\n  \"protected_paths\": [\n    \"src/\"\n  ],\n  \
          \"standing_gates\": [],\n  \"codegen\": []\n}\n"
     );
     assert_eq!(
@@ -1263,7 +1280,7 @@ fn init_writes_settings_and_config_json() {
         "{\n  \"permissions\": {\n    \"deny\": [\n      \"Bash(flow approve:*)\",\n      \
          \"Bash(flow delegate:*)\",\n      \"Bash(flow pause:*)\",\n      \
          \"Bash(flow resume:*)\",\n      \"Bash(flow abandon:*)\",\n      \
-         \"Edit(work/flow.json)\",\n      \"Edit(work/*/state.json)\"\n    ]\n  }\n}\n"
+         \"Edit(flow/flow.json)\",\n      \"Edit(flow/*/state.json)\"\n    ]\n  }\n}\n"
     );
 }
 

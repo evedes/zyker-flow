@@ -33,8 +33,8 @@ pub struct Config {
     _rest: Extra,
 }
 
-fn default_work_dir() -> String {
-    "work".into()
+pub fn default_work_dir() -> String {
+    "flow".into()
 }
 
 fn deploy_section<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Deploy>, D::Error> {

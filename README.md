@@ -121,7 +121,7 @@ else its path (see [The flow binary](#the-flow-binary)).
 
 ```json
 {
-  "work_dir": "work",
+  "work_dir": "flow",
   "protected_paths": ["lib/", "test/", "mix.exs"],
   "standing_gates": ["mix test"],
   "codegen": ["\\bmix\\s+(phx|ecto)\\.gen\\.\\S", "\\bmix\\s+format\\b(?!.*--check-formatted)"],
@@ -138,7 +138,7 @@ else its path (see [The flow binary](#the-flow-binary)).
 
 | Key | Meaning |
 |---|---|
-| `work_dir` | where feature records live (default `work`) |
+| `work_dir` | where feature records live (default `flow`; `flow init` used to write `work`) |
 | `protected_paths` | path prefixes that count as code, relative to the git root (`./lib/` is `lib`); an absolute one, one with `..` or a glob, and one naming the whole repo are errors |
 | `standing_gates` | shell commands `flow gates` runs at the git root, before every ticket's verification commands |
 | `codegen` | regexes ([fancy-regex](https://docs.rs/fancy-regex) syntax) for commands that write code without naming the files (generators, formatters); each is searched for in one simple command at a time |
@@ -384,7 +384,7 @@ Don't also wire the hooks in a repo's own `.claude/settings.json`: plugin and
 project hooks both run, so every check would run twice.
 
 To opt a repo in, run `flow init` at its root, then edit `.flow.json` and
-`work/STANDING.md`. Start Claude Code at (or under) that root: the hooks only
+`flow/STANDING.md`. Start Claude Code at (or under) that root: the hooks only
 apply when the session's working directory is inside the repo.
 
 ### The flow binary

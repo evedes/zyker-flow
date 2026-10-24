@@ -88,7 +88,7 @@ fn read_json(path: &Path) -> Result<Value, String> {
 /// The cases for this repo's config and state.
 fn cases(root: &Path) -> Result<Vec<Case>, String> {
     let cfg = read_json(&root.join(".flow.json"))?;
-    let work = cfg["work_dir"].as_str().unwrap_or("work");
+    let work = cfg["work_dir"].as_str().unwrap_or("flow");
     let global = root.join(work).join("flow.json");
     let global = if global.is_file() { read_json(&global)? } else { json!({}) };
     let phase = match global["active"].as_str().filter(|a| !a.is_empty()) {
