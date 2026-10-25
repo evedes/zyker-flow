@@ -539,6 +539,81 @@ fn spec_changes_merge_into_the_living_spec_at_done() {
         t.read("work/specs/farewell.md"),
         "# farewell\n\n## Goodbye\n\nSays goodbye.\n#### Scenario: leaving\nBye.\n"
     );
+    // Done commits what it wrote, and only that.
+    assert_in(
+        "now in phase done; committed work/specs/farewell.md, work/specs/greeting.md, \
+         work/001-hello/state.json, work/flow.json",
+        &r.stdout,
+    );
+    assert_eq!(t.git(&["status", "--porcelain"]), "");
+    assert_eq!(t.git(&["log", "-1", "--format=%s"]), "flow: 001-hello done\n");
+    let files = t.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(
+        files,
+        "work/001-hello/state.json\nwork/flow.json\nwork/specs/farewell.md\nwork/specs/greeting.md\n"
+    );
+}
+
+#[test]
+fn review_checks_the_code_against_the_spec_changes() {
+    let t = Flow::new();
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    assert_in(
+        "## Living spec\nTODO(flow): does the code change behaviour the living spec (work/specs/)",
+        &t.fread("review.md"),
+    );
+    t.fwrite("review.md", &REVIEW.replace("## Living spec\nCovered.\n", ""));
+    assert_in("'## living spec' is missing", &t.flow_any(&["advance"]).stderr);
+    t.fwrite("review.md", REVIEW);
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "ship");
+}
+
+#[test]
+fn done_leaves_an_untracked_flow_json_out_of_its_commit() {
+    let t = Flow::new();
+    t.write(".gitignore", "work/flow.json\n");
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "ignore the active pointer"]);
+    t.to_ship();
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "hello"]);
+    let r = t.flow(&["advance"]);
+    assert_in("now in phase done; committed work/001-hello/state.json\n", &r.stdout);
+    assert_eq!(t.git(&["status", "--porcelain"]), "");
+    assert_eq!(parse(&t.read("work/flow.json"))["active"], Value::Null);
+}
+
+#[test]
+fn done_puts_everything_back_when_its_commit_fails() {
+    let t = Flow::new();
+    t.write("work/specs/greeting.md", "# greeting\n\n## Hello\n\nSays hi.\n");
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "living spec"]);
+    t.to_ship_with(&spec_changing("### Changed greeting: Hello\nSays hello.\n"));
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "hello"]);
+    let hook = t.path(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\necho 'pre-commit says no' >&2\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let r = t.flow_any(&["advance"]);
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_in("pre-commit says no", &r.stderr);
+    assert_in("nothing changed: 001-hello is still in ship", &r.stderr);
+    assert_eq!(t.phase(), "ship");
+    assert_eq!(parse(&t.read("work/flow.json"))["active"], "001-hello");
+    assert_eq!(t.read("work/specs/greeting.md"), "# greeting\n\n## Hello\n\nSays hi.\n");
+    assert_eq!(t.git(&["status", "--porcelain"]), "");
+
+    fs::remove_file(&hook).unwrap();
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "done");
+    assert_eq!(t.git(&["status", "--porcelain"]), "");
+    assert_in("Says hello.", &t.read("work/specs/greeting.md"));
 }
 
 #[test]

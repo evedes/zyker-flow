@@ -73,3 +73,7 @@ spec and tickets, with the gate results flow recorded:
 - It follows the repository's conventions and the standing agreement (STANDING.md).
 - Nothing in it works around flow: no checks weakened, no tests skipped or deleted to
   make the gates pass.
+- The spec's `## Spec changes` matches the code: every behaviour the diff adds, changes or
+  removes that the living spec (`<work_dir>/specs/*.md`, read them) describes, or should,
+  has its entry there, and every declared change is built. A gap either way is a finding,
+  because done merges exactly those entries into the living spec.

@@ -147,8 +147,11 @@ with one is missing or empty.
 5. **review** — with review delegated, run `flow judge`: it writes `review.md`
    itself, and a verdict you write there doesn't count. Otherwise dispatch a
    fresh subagent that did not write the code. Give it
-   `spec.md`, the tickets and `git diff`, and have it write `review.md`
-   (Verdict `pass`/`fail`, findings with file:line). On `fail`: `flow back`,
+   `spec.md`, the tickets, the living spec and `git diff`, and have it write
+   `review.md` (Verdict `pass`/`fail`, findings with file:line). Under
+   `## Living spec` it checks the code against `## Spec changes`: behaviour
+   the code changes without an entry, or a declared change it doesn't make, is
+   a blocking finding, since done merges exactly those entries. On `fail`: `flow back`,
    fix, `flow gates`, `flow advance`, review again. Every move into review
    keeps the previous `review.md` as `review-<n>.md` and starts a fresh one,
    so each round needs a new review. Change nothing during review, docs
@@ -158,9 +161,10 @@ with one is missing or empty.
    section in `.flow.json`, push too: the push hook refuses while a CI/deploy
    run is in flight. Watch with `flow deploy`; `flow advance` to **done** once
    CI is green for HEAD and the health check returns 200. Without one, ship
-   ends once everything is committed. Moving to done rewrites `state.json` and
-   merges the spec changes into `<work>/specs/`, so commit the `<work>` folder
-   once more afterwards. When CI fails, find the cause with the CI's own
+   ends once everything is committed. Moving to done rewrites `state.json`,
+   merges the spec changes into `<work>/specs/` and commits both itself
+   (`flow: <id> done`); if that commit fails (a pre-commit hook, say) nothing
+   changes and the feature stays in ship: fix the cause and advance again. When CI fails, find the cause with the CI's own
    tooling (its job logs, or the failing step run locally), then `flow back`
    to build to fix it; a fix the approved tickets don't cover goes back to
    tickets (or spec) for a new one first.

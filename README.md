@@ -22,7 +22,7 @@ nothing.
 | Spec and tickets need the user's approval, or the judge's where the user delegated it; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again | CLI |
 | A delegated review needs the judge's approval (or the user's) of the exact code; a verdict the agent writes in `review.md` doesn't count | CLI |
 | While a feature is active, the rules it is judged by (`.flow.json`, `.claude/settings.json` and `.claude/settings.local.json`, which hold the hooks and deny rules, `<work_dir>/STANDING.md`, `<work_dir>/templates/`, `<work_dir>/specs/`) change only by hand | hook |
-| The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply | CLI |
+| The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply; done commits it, and review checks the code against those changes | CLI |
 | A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
 | The agent can't run `approve`, `delegate`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
 
@@ -304,7 +304,15 @@ lacks (or has twice), two entries for one requirement, a heading of another
 shape, or text with no entries. ship→done merges them: Changed in place, Added
 at the end of its area (a new area file starts with `# <area>`), Removed taken
 out, and the touched files rewritten with blank lines between headings and
-bodies. They land in the commit that done already needs for `state.json`.
+bodies. Done then commits them itself, with the feature's `state.json` and
+`<work_dir>/flow.json` where the repo tracks it (`flow: <id> done`, only those
+paths, the repo's own commit hooks running); a commit that fails puts every
+file back, leaves the feature in ship and says why.
+
+Review checks that the merge will be true: `review.md`'s `## Living spec`
+(and the judge's review brief) asks whether the code changes behaviour the
+living spec describes without an entry in `## Spec changes`, or leaves a
+declared change unbuilt; either is a blocking finding.
 
 A repo with no code yet grows its living spec from its features' spec
 changes. One that adopts flow with code already in it must write the spec
@@ -335,9 +343,8 @@ Per repo:
   flow rewrites the two state files pretty-printed (non-ASCII as UTF-8),
   keeping keys it doesn't know; a known key of the wrong type, or an unknown
   phase, fails every command and hook.
-  `flow advance` to done changes `state.json`, and merges the spec changes into
-  `<work_dir>/specs/`, after the ship commit, so commit the work dir once more
-  afterwards.
+  `flow advance` to done changes `state.json`, merges the spec changes into
+  `<work_dir>/specs/`, and commits both (see [The living spec](#the-living-spec)).
 
 In the plugin:
 
@@ -492,8 +499,6 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
   PATH can put its own judge there. The judge also reads what the agent wrote,
   and a model can be talked round where a hash can't: a delegated gate is only as
   strong as the judge.
-- flow does not commit the living spec's merge at done, and nothing checks
-  that it was committed.
 - `flow gates` fingerprints the tree after the commands run, so a gate that
   rewrites code (an unchecked formatter, a generator) passes on code it never
   checked.

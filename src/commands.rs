@@ -9,7 +9,7 @@ use crate::deploy::{self, exit_code};
 use crate::error::{bail, Error, Result};
 use crate::judge::{self, Verdict, GATES, MAX_REJECTS};
 use crate::markdown::{gate_commands, Sections};
-use crate::paths::{file_name, flow_cmd, io_error, write};
+use crate::paths::{file_name, flow_cmd, io_error, posix, write};
 use crate::repo::{git, Repo};
 use crate::shell::USER_ONLY;
 use crate::specs;
@@ -196,25 +196,63 @@ pub fn advance(repo: &Repo) -> Result<i32> {
             scaffold(repo, &fid, &st, "review.md", None)?;
         }
         Phase::Ship => st.reviewed_fingerprint = Some(Some(repo.fingerprint()?)),
-        Phase::Done => {
-            let merge = specs::merge(repo, &fid)?;
-            if !merge.problems.is_empty() {
-                bail!("cannot merge the spec changes:\n{}", bullets(&merge.problems));
-            }
-            let written = specs::apply(repo, merge)?;
-            if !written.is_empty() {
-                println!("merged the spec changes into {}", written.join(", "));
-            }
-        }
+        Phase::Done => return finish(repo, &fid, st),
         _ => {}
     }
     st.phase = next;
     st.history.push(Event::now(next));
     repo.save_state(&fid, &st)?;
-    if next == Phase::Done {
-        repo.set_active(None)?;
-    }
     println!("{fid}: now in phase {next}");
+    Ok(0)
+}
+
+/// Ship → done: merges the feature's spec changes into the living spec, records done,
+/// frees the active slot, and commits those files, so the living spec on the branch is
+/// the one that shipped. A commit that fails puts every file back as it was.
+fn finish(repo: &Repo, fid: &str, mut st: State) -> Result<i32> {
+    let merge = specs::merge(repo, fid)?;
+    if !merge.problems.is_empty() {
+        bail!("cannot merge the spec changes:\n{}", bullets(&merge.problems));
+    }
+    let global = repo.work.join("flow.json");
+    let mut touched: Vec<PathBuf> = merge.writes.iter().map(|(p, _)| p.clone()).collect();
+    touched.extend([repo.fdir(fid).join("state.json"), global.clone()]);
+    let before: Vec<(PathBuf, Option<Vec<u8>>)> =
+        touched.iter().map(|p| (p.clone(), fs::read(p).ok())).collect();
+    let rel =
+        |p: &PathBuf| p.strip_prefix(&repo.root).map_or_else(|_| p.display().to_string(), posix);
+    // flow.json is committed only where the repo tracks it.
+    let global_rel = rel(&global);
+    let tracked = git(&repo.root, &["ls-files", "--error-unmatch", "--", &global_rel]).is_ok();
+    let rels: Vec<String> =
+        touched.iter().map(rel).filter(|r| tracked || *r != global_rel).collect();
+    let on = |args: &[&str]| {
+        let mut args = args.to_vec();
+        args.extend(rels.iter().map(String::as_str));
+        git(&repo.root, &args)
+    };
+
+    let written = specs::apply(repo, merge)?;
+    st.phase = Phase::Done;
+    st.history.push(Event::now(Phase::Done));
+    repo.save_state(fid, &st)?;
+    repo.set_active(None)?;
+    let message = format!("flow: {fid} done");
+    if let Err(e) = on(&["add", "--"]).and_then(|_| on(&["commit", "-q", "-m", &message, "--"])) {
+        for (path, old) in before {
+            match old {
+                Some(bytes) => write(&path, bytes)?,
+                None => fs::remove_file(&path).map_err(|e| io_error(&path, e))?,
+            }
+        }
+        let _ = on(&["reset", "-q", "--"]);
+        let cmd = flow_cmd(&repo.root);
+        bail!("{e}\nnothing changed: {fid} is still in ship; fix that and `{cmd} advance` again");
+    }
+    if !written.is_empty() {
+        println!("merged the spec changes into {}", written.join(", "));
+    }
+    println!("{fid}: now in phase done; committed {}", rels.join(", "));
     Ok(0)
 }
 

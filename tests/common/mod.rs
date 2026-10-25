@@ -82,6 +82,8 @@ test -f lib/app.ex
 pub const REVIEW: &str = "# Review: x
 ## Verdict
 pass — matches the spec.
+## Living spec
+Covered.
 ## Findings
 None.
 ";
