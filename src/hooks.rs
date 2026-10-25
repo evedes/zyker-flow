@@ -431,7 +431,7 @@ fn session_start(payload: Value) -> Result<Option<String>> {
     }
     let active = active.as_ref().ok().and_then(|a| a.as_ref()).map(|(f, st)| (f.as_str(), st));
     ctx += "\n\n";
-    ctx += &primer(&repo, active);
+    ctx += &primer(&repo, active)?;
     let out =
         json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}});
     Ok(Some(out.to_string()))

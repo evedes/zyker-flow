@@ -363,6 +363,7 @@ fn init_opts_a_repo_in() {
     }
     assert!(!deny.iter().any(|r| r.starts_with("Write(")), "{deny:?}");
     assert_in("already exists", &t.flow_any(&["init"]).stderr);
+    t.living_spec("flow");
     t.flow(&["new", "hello"]);
     let r = t.bash("mix phx.gen.live Blog Post posts");
     assert_in("phase explore", &denied(r));
@@ -406,7 +407,41 @@ fn ship_to_done_after_commit() {
     t.git(&["commit", "-qm", "hello"]);
     t.flow(&["advance"]);
     assert_eq!(t.phase(), "done");
+    t.living_spec("work");
     t.flow(&["new", "next"]); // active slot is free again
+}
+
+#[test]
+fn new_needs_a_living_spec_once_the_repo_has_code() {
+    let t = Flow::new();
+    // No code yet: the living spec grows from the features' spec changes.
+    t.flow(&["new", "first"]);
+    t.flow(&["abandon"]);
+
+    // Code, tracked or not, and nothing in work/specs/ that names an area.
+    t.write("lib/app.ex", "hello\n");
+    t.write("work/specs/notes.txt", "not an area\n");
+    t.write("work/specs/Bad Name.md", "# not an area\n");
+    fs::create_dir_all(t.path("work/specs/dir.md")).unwrap();
+    let r = t.flow_any(&["new", "second"]);
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_in(
+        "work/specs/ has no living spec yet, but this repo already has code under its protected \
+         paths: write one first, one <area>.md per product area",
+        &r.stderr,
+    );
+    assert_in("\"Starting the living spec\"", &r.stderr);
+    assert!(!t.path("work/002-second").exists());
+    let cmd = flow_bin().display().to_string();
+    let ctx = session_context(&t);
+    assert_in("\nNow (no active feature, no living spec): ", &ctx);
+    assert_in(&format!("so `{cmd} new` refuses until its living spec exists"), &ctx);
+
+    // Writing the spec needs no feature, and one area file is enough.
+    assert_eq!(t.edit("work/specs/app.md"), None);
+    t.living_spec("work");
+    t.flow(&["new", "second"]);
+    assert!(!session_context(&t).contains("no living spec"));
 }
 
 #[test]
@@ -1325,11 +1360,13 @@ fn init_writes_settings_and_config_json() {
          \"n\": 1, \"f\": 1.5, \"t\": true, \"z\": null, \"o\": {}}";
     t.write(".claude/settings.json", settings);
     let r = t.flow(&["init"]);
+    let cmd = flow_bin().display().to_string();
     assert_eq!(
         r.stdout,
-        "wrote .flow.json (defaults for mix.exs), flow/STANDING.md and deny rules in .claude/settings.json\n\
+        format!("wrote .flow.json (defaults for mix.exs), flow/STANDING.md and deny rules in .claude/settings.json\n\
          next: check protected_paths, standing_gates and codegen in .flow.json, fill in flow/STANDING.md, \
-         and add a deploy section if ship should wait for CI\n"
+         and add a deploy section if ship should wait for CI; if the repo already has code, write its \
+         living spec in flow/specs/ before the first feature (`{cmd} new` refuses until then)\n")
     );
     // Every key kept; the deny rules added after the existing ones.
     let mut want = parse(settings);
@@ -1430,6 +1467,7 @@ fn codegen_defaults_and_the_real_repos_patterns_work() {
         fs::remove_file(t.path(".flow.json")).unwrap();
         t.write(marker, "\n");
         t.flow(&["init"]);
+        t.living_spec("flow");
         t.flow(&["new", "hello"]);
         for c in codegen {
             assert_in("phase explore", &denied(t.bash(c)));
@@ -1487,6 +1525,7 @@ fn fingerprint_and_artifact_hashes_are_stable() {
         "work/templates/spec.md",
         format!("{before}{}", &after[after.find("## Out").unwrap()..]),
     );
+    t.living_spec("work");
     t.flow(&["new", "hello", "Hello"]);
     t.fwrite("research.md", RESEARCH);
     t.flow(&["advance"]);

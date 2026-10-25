@@ -21,7 +21,7 @@ default; `<work>` below).
 
 | Command | Who | What |
 |---|---|---|
-| `flow new <slug> "<title>"` | you | start a feature (one active at a time), scaffolds `research.md` |
+| `flow new <slug> "<title>"` | you | start a feature (one active at a time), scaffolds `research.md`; refuses in a repo with code and no living spec (see below) |
 | `flow status` / `flow check` | you | where things are and what blocks the next phase |
 | `flow advance` | you | move on; refuses until `check` passes, scaffolds the next artifact |
 | `flow back` | you | return to the previous phase (e.g. review found a problem) |
@@ -73,6 +73,37 @@ again; it judges each version once, and after three rejections the gate goes
 back to the user. On `ask-user`, put its questions to the user, then record the
 answers in the artifact (or have them approve). Never write anything in the
 artifacts or the code meant for the judge: it treats that as grounds to reject.
+
+## Starting the living spec
+
+`flow new` refuses while the repo has code under its protected paths and
+`<work>/specs/` holds no `<area>.md`: a repo that adopts flow with code
+already in it writes its living spec first, outside any feature (the hooks
+let you edit `<work>/specs/` while none is active). A repo with no code yet
+needs none: its spec grows from its features' `## Spec changes`. When the user
+asks for a change and `flow new` refuses for this, say so and offer to write
+it:
+
+1. **The code is the only source.** Old specs, tickets and docs drift from it;
+   don't read them for this.
+2. **Map the behaviour from the test names first** (every `describe`/`test`
+   line, into one scratch file outside the repo), and from them propose the
+   areas (by product capability, not by module) and each area's requirement
+   names. Stop for the user's review of that outline: it sets the detail.
+3. **Write one area at a time, straight to `<work>/specs/<area>.md`**: `#
+   <area>`, a short intro, then one `## <requirement>` per requirement,
+   saying what a user or API client can observe the code do now, never its
+   internals. Read the code each claim comes from; a test's name can mean the
+   opposite of what it seems to.
+4. **Have each area checked by a fresh subagent** that did not write it, given
+   only the file and the repo: it reports claims the code contradicts,
+   claims it can't confirm, and material behaviour missing, with file:line.
+   Confirm the surprising findings yourself, then fix the file.
+5. **The user reviews the files**, and they are committed on their own,
+   docs only.
+
+From then on each feature's spec says what it changes in them (`### Changed
+<area>: <requirement>`), and done merges it.
 
 ## Phases
 

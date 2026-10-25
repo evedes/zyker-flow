@@ -8,11 +8,40 @@ use crate::paths::{posix, read_text, write};
 use crate::repo::Repo;
 use regex::Regex;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 static ENTRY: LazyLock<Regex> = regex!(r"(?i)^(added|changed|removed)\s+([^:]*?)\s*:\s*(.*)$");
 static AREA: LazyLock<Regex> = regex!(r"^[a-z0-9][a-z0-9_-]*$");
+
+/// The living spec's areas: each `<area>.md` file in <work_dir>/specs/ named like one.
+pub fn areas(repo: &Repo) -> Vec<String> {
+    let entries = fs::read_dir(repo.work.join("specs")).into_iter().flatten().flatten();
+    let mut areas: Vec<String> = entries
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".md").map(String::from))
+        .filter(|area| AREA.is_match(area))
+        .collect();
+    areas.sort();
+    areas
+}
+
+/// Why a repo can't start a feature yet: it has code under its protected paths and no
+/// living spec saying how that code behaves. A repo without code grows its spec from
+/// its features' spec changes instead.
+pub fn bootstrap_problem(repo: &Repo) -> Result<Option<String>> {
+    if !areas(repo).is_empty() || !repo.has_code()? {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{}/specs/ has no living spec yet, but this repo already has code under its \
+         protected paths: write one first, one <area>.md per product area with a \
+         `## <requirement>` section per requirement, saying what the code does now (the \
+         flow skill's \"Starting the living spec\")",
+        repo.work_rel
+    )))
+}
 
 /// `text` split at its headings of `hashes` (outside code fences): the text before the
 /// first, then each heading as written with its body, blank lines around both dropped.

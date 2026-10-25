@@ -86,7 +86,9 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
   active) and a primer, whether or not the skill gets loaded: what flow is and
   what it holds the work to (approved intent, the exact code that passed gates
   and review, the rule files, the user's commands), the repo's protected paths,
-  what to do in the current phase, the gates delegated to the judge, and to
+  what to do in the current phase (or, with no feature active in a repo with
+  code and no living spec, that it must be written first), the gates
+  delegated to the judge, and to
   keep the user told what flow is doing: the phase, each advance or back, what
   blocks, which approval is needed, every denial and why.
 - **Fail closed.** If the pre-tool-use hook fails (an error, a panic, a
@@ -112,7 +114,7 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
 | Command | Who | What |
 |---|---|---|
 | `flow init` | anyone | opt the repo in: `.flow.json`, `<work_dir>/STANDING.md`, deny rules (refuses if `.flow.json` exists) |
-| `flow new <slug> ["<title>"]` | agent | start a feature `NNN-<slug>` (one active at a time; a leading `NNN-` in the slug is dropped); the title defaults to the slug |
+| `flow new <slug> ["<title>"]` | agent | start a feature `NNN-<slug>` (one active at a time; a leading `NNN-` in the slug is dropped); the title defaults to the slug. Refuses while the repo has code and no living spec (see [The living spec](#the-living-spec)) |
 | `flow status`, `flow check` | anyone | where things are, what blocks the next phase (`check` exits 1 while blocked) |
 | `flow advance`, `flow back` | agent | move forward (when `check` passes) or back one phase |
 | `flow gates` | agent | in build: run standing gates + every ticket's verification commands, record result and fingerprint (refuses while an approval is stale) |
@@ -304,8 +306,17 @@ at the end of its area (a new area file starts with `# <area>`), Removed taken
 out, and the touched files rewritten with blank lines between headings and
 bodies. They land in the commit that done already needs for `state.json`.
 
-Nothing writes the living spec before done, so a repo starts it by hand,
-outside any feature (from the specs of features already done, say).
+A repo with no code yet grows its living spec from its features' spec
+changes. One that adopts flow with code already in it must write the spec
+first: while any file git sees under `protected_paths` exists and
+`<work_dir>/specs/` holds no `<area>.md` (a file named like an area), `flow new`
+refuses, the session-start primer says so, and `flow init` says it in its
+next steps. It is written outside any feature, when the hooks allow editing
+`<work_dir>/specs/`, from the code alone: map the behaviour from the test
+names, agree the areas and requirement names with the user, write one area at
+a time, have each checked against the code by a fresh agent, then the user's
+review and a docs-only commit. The skill's "Starting the living spec" has the
+steps.
 
 ## Files
 
@@ -399,7 +410,8 @@ Don't also wire the hooks in a repo's own `.claude/settings.json`: plugin and
 project hooks both run, so every check would run twice.
 
 To opt a repo in, run `flow init` at its root, then edit `.flow.json` and
-`flow/STANDING.md`. The hooks apply to whatever a session does in the repo,
+`flow/STANDING.md`, and, when the repo already has code, have its living spec
+written before the first feature (see [The living spec](#the-living-spec)). The hooks apply to whatever a session does in the repo,
 wherever the session was started; start it at (or under) that root so the
 session-start hook reports the active feature.
 

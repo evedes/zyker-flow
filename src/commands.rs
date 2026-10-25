@@ -82,6 +82,9 @@ pub fn new(repo: &Repo, args: &[String]) -> Result<i32> {
         let cmd = flow_cmd(&repo.root);
         bail!("feature {active} is still active; finish it or `! {cmd} abandon`");
     }
+    if let Some(why) = specs::bootstrap_problem(repo)? {
+        bail!("{why}");
+    }
     let entries = fs::read_dir(&repo.work).into_iter().flatten().flatten();
     let last = entries.filter_map(|e| feature_number(e.file_name().to_str()?)).max();
     let fid = format!("{:03}-{slug}", last.unwrap_or(0) + 1);
@@ -532,7 +535,7 @@ pub fn init(root: &Path) -> Result<i32> {
         .collect();
     deny.extend(missing.into_iter().map(Value::String));
     write_json(&settings_path, &settings)?;
-    let work = &repo.work_rel;
+    let (work, cmd) = (&repo.work_rel, flow_cmd(root));
     let how = if marker.is_empty() {
         "no known stack: guessed".into()
     } else {
@@ -543,7 +546,9 @@ pub fn init(root: &Path) -> Result<i32> {
     );
     println!(
         "next: check protected_paths, standing_gates and codegen in .flow.json, fill in \
-         {work}/STANDING.md, and add a deploy section if ship should wait for CI"
+         {work}/STANDING.md, and add a deploy section if ship should wait for CI; if the \
+         repo already has code, write its living spec in {work}/specs/ before the first \
+         feature (`{cmd} new` refuses until then)"
     );
     Ok(0)
 }

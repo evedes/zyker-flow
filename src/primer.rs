@@ -3,12 +3,14 @@
 //! detail; this is what every session gets whether or not the skill is loaded.
 
 use crate::config::{Phase, State};
+use crate::error::Result;
 use crate::judge::GATES;
 use crate::repo::Repo;
+use crate::specs;
 
 /// The primer after the status line; `active` is the active feature, when there is one
 /// and its state could be read.
-pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> String {
+pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> Result<String> {
     let cmd = crate::paths::flow_cmd(&repo.root);
     let work = &repo.work_rel;
     let mut out = vec![
@@ -45,6 +47,13 @@ pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> String {
         ));
     }
     out.push(match active {
+        None if specs::bootstrap_problem(repo)?.is_some() => format!(
+            "Now (no active feature, no living spec): this repo has code but {work}/specs/ is \
+             empty, so `{cmd} new` refuses until its living spec exists. Before the first \
+             feature, write it as the flow skill's \"Starting the living spec\" says: from the \
+             code, one <area>.md per product area, then the user's review. Tell the user this \
+             when they ask for a change. Reading and discussion are free meanwhile."
+        ),
         None => format!(
             "Now (no active feature): reading, research and discussion are free, and so are \
              changes outside protected code. Before changing protected code, run `{cmd} new \
@@ -72,7 +81,7 @@ pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> String {
          denial with its reason. A denial is flow holding the work to what was agreed: fix \
          its cause or ask the user, never route around it."
     ));
-    out.join("\n")
+    Ok(out.join("\n"))
 }
 
 /// What to do in the active feature's phase.

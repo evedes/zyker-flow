@@ -342,6 +342,11 @@ impl Flow {
         write(&self.path(rel), text);
     }
 
+    /// A living spec in `work_dir`, which `flow new` needs once the repo has code.
+    pub fn living_spec(&self, work_dir: &str) {
+        self.write(&format!("{work_dir}/specs/app.md"), "# app\n\n## Hello\nIt says hello.\n");
+    }
+
     pub fn read(&self, rel: &str) -> String {
         read(&self.path(rel))
     }

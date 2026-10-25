@@ -281,6 +281,12 @@ impl Repo {
         Ok(hex16(&h.finalize()))
     }
 
+    /// Whether any file git sees (tracked, or untracked and not ignored) is protected code.
+    pub fn has_code(&self) -> Result<bool> {
+        let out = git(&self.root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
+        Ok(out.split('\0').any(|f| !f.is_empty() && self.is_protected(f)))
+    }
+
     /// The paths `git status` lists, both sides of a rename or copy.
     pub fn changed_paths(&self) -> Result<Vec<String>> {
         let out = git(&self.root, &["status", "--porcelain", "-z", "--untracked-files=all"])?;
