@@ -36,7 +36,7 @@ jobs:
 
   # bin/flow runs the release binary SHA256SUMS pins, and only for the sources it was
   # built from: on main, VERSION, Cargo.toml, SHA256SUMS and the published release must
-  # agree (see README, "Releasing").
+  # agree (see docs/development.md, "Releasing").
   release-pin:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

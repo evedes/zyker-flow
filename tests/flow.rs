@@ -1638,7 +1638,7 @@ enum Verdict {
 fn bash_edge_cases() {
     // flow's verdicts on commands at the edges of the shell splitting, heredoc, redirect,
     // write-hint, codegen and git rules, in phase explore with an uncommitted lib/x.ex.
-    // Some allow what they arguably should not (README, "Known limitations").
+    // Some allow what they arguably should not (docs/limitations.md).
     use Verdict::*;
     let t = Flow::new();
     t.flow(&["new", "hello"]);

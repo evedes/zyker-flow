@@ -3,7 +3,7 @@
 # GitHub release bin/flow downloads from. The release stays a draft (not downloadable)
 # until every binary and SHA256SUMS are attached, and a published release is never
 # changed. bin/flow trusts only the SHA256SUMS committed next to VERSION:
-# scripts/pin-release copies this one there (see README, "Releasing").
+# scripts/pin-release copies this one there (see docs/development.md, "Releasing").
 name: release
 
 on:
