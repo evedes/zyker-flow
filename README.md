@@ -89,8 +89,15 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
   levels deep) is denied in a repo with a `.flow.json`, judged from the hook's
   own working directory, and allowed elsewhere. The session-start hook stays
   silent on errors.
-- **Root.** The hooks find the repo from the session's working directory
-  (`git rev-parse --show-toplevel`), not from the file being edited.
+- **Root.** Each path and command is judged by the flow repo it acts in, so a
+  session in one repo working on another gets the other's rules and state. An
+  absolute path (an edited file, a redirect target, a word a mutating command
+  names) belongs to the repo it resolves into; a relative one to the repo its
+  command runs in: the session's working directory, moved by a `cd`/`pushd`
+  earlier in the same call (one that can be followed: not to a directory that
+  isn't there, nor one only the shell can work out) and by a git command's
+  `-C`. That repo is the innermost git root with a `.flow.json` around the
+  path, past nested repos without one (a dependency checked out in the tree).
 
 ## Commands
 
@@ -384,8 +391,9 @@ Don't also wire the hooks in a repo's own `.claude/settings.json`: plugin and
 project hooks both run, so every check would run twice.
 
 To opt a repo in, run `flow init` at its root, then edit `.flow.json` and
-`flow/STANDING.md`. Start Claude Code at (or under) that root: the hooks only
-apply when the session's working directory is inside the repo.
+`flow/STANDING.md`. The hooks apply to whatever a session does in the repo,
+wherever the session was started; start it at (or under) that root so the
+session-start hook reports the active feature.
 
 ### The flow binary
 
@@ -479,6 +487,10 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
   protected path, resolves relative paths against the git root rather than the
   shell's cwd, and denies copies *out of* protected paths
   (`cp lib/x /tmp/`).
+- Bash commands are placed in a repo by a plain `cd`/`pushd` and `git -C` only:
+  a `cd` in a subshell (`(cd ../b && …)`) or through a variable, and git's
+  `--git-dir`/`--work-tree`, aren't followed, so those commands are judged where
+  the call started.
 - The feature's state is untracked until it is first committed, and the hooks
   allow `git stash -u` and `git clean`, which remove it. flow then reports no
   active feature, or, when a tracked `<work_dir>/flow.json` survives, that the

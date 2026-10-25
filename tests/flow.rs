@@ -886,6 +886,54 @@ fn paths_name_code_only_inside_the_repo() {
 }
 
 #[test]
+fn each_repo_judges_what_is_done_in_it() {
+    // The session is in this repo (phase explore); `other` is a second flow repo, with no
+    // feature active.
+    let t = Flow::new();
+    t.flow(&["new", "hello"]);
+    let other = Flow::new();
+    let o = other.root.display().to_string();
+    let none = "there is no active feature";
+    let edit_other = t.hook("Edit", json!({"file_path": other.path("lib/app.ex")}));
+    assert_in("no active feature", &denied(edit_other));
+    assert_in("phase explore", &denied(t.edit("lib/app.ex")));
+    assert_in("no active feature", &denied(t.bash(&format!("cd {o} && echo x > lib/app.ex"))));
+    assert_in("state files", &denied(t.bash(&format!("rm {o}/work/flow.json"))));
+    // Code changed here doesn't stop a docs commit there, and code changed there is
+    // judged there.
+    t.write("lib/x.ex", "x\n");
+    other.write("README.md", "more\n");
+    assert_eq!(t.bash(&format!("cd {o} && git commit -m docs README.md")), None);
+    other.git(&["add", "README.md"]);
+    assert_eq!(t.bash(&format!("cd {o}; git commit -m docs")), None);
+    other.write("lib/y.ex", "y\n");
+    for c in [format!("cd {o} && git commit -am x"), format!("git -C {o} commit -am x")] {
+        assert_in(none, &denied(t.bash(&c)));
+    }
+    // A `cd` back, or to a directory that isn't there, leaves the commands after it here.
+    let back = format!("cd {o} && cd {} && echo x > lib/app.ex", t.root.display());
+    assert_in("phase explore", &denied(t.bash(&back)));
+    assert_in("phase explore", &denied(t.bash("cd /no/such/dir; echo x > lib/app.ex")));
+
+    // A session outside any flow repo is still judged by the repo it acts in.
+    let mut t = t;
+    let outside = TempDir::new();
+    t.set_env("GIT_CEILING_DIRECTORIES", outside.path().parent().unwrap());
+    let edit = json!({"cwd": outside.path(), "tool_name": "Edit",
+                      "tool_input": {"file_path": t.path("lib/app.ex")}});
+    assert_in("phase explore", &denied(pre(&t, outside.path(), &edit.to_string())));
+    let bash = json!({"cwd": outside.path(), "tool_name": "Bash",
+                      "tool_input": {"command": format!("cd {} && mix format", t.root.display())}});
+    assert_in("phase explore", &denied(pre(&t, outside.path(), &bash.to_string())));
+
+    // A repo nested in the tree without a .flow.json (a dependency) is the outer repo's.
+    let dep = t.path("lib/dep");
+    fs::create_dir_all(&dep).unwrap();
+    run(t.command("git").args(["init", "-q"]).current_dir(&dep), None);
+    assert_in("phase explore", &denied(t.edit("lib/dep/x.ex")));
+}
+
+#[test]
 fn pause_lifts_code_gates_but_not_state_protection() {
     let t = Flow::new();
     t.flow(&["new", "hello"]);

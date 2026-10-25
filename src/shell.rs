@@ -213,7 +213,7 @@ pub fn commits_index_only(cmds: &[String]) -> bool {
 
 /// A simple command split into words as the shell would (quotes removed, backslashes
 /// applied); None when a quote is left open.
-fn shell_words(cmd: &str) -> Option<Vec<String>> {
+pub fn shell_words(cmd: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word: Option<String> = None;
     let mut chars = cmd.chars();
@@ -255,6 +255,59 @@ fn shell_words(cmd: &str) -> Option<Vec<String>> {
     }
     words.extend(word);
     Some(words)
+}
+
+/// The words of a simple command after its `VAR=value` assignments.
+fn command_words(cmd: &str) -> Option<Vec<String>> {
+    let mut words = shell_words(cmd)?;
+    let assigns = words.iter().take_while(|w| ASSIGN.is_match(w)).count();
+    words.drain(..assigns);
+    Some(words)
+}
+
+static ASSIGN: LazyLock<Regex> = regex!(r"^[A-Za-z_][A-Za-z0-9_]*=");
+
+/// Where a `cd` or `pushd` goes: None when the command is neither, Some(None) when it
+/// can't be told from the text (`cd -`, an open quote, more than one directory), else
+/// the directory as written (`~` for a bare `cd`).
+pub fn cd_target(cmd: &str) -> Option<Option<String>> {
+    let first = cmd.split(is_space).find(|w| !w.is_empty())?;
+    if first != "cd" && first != "pushd" {
+        return None;
+    }
+    let Some(words) = command_words(cmd) else {
+        return Some(None);
+    };
+    let dirs: Vec<&String> = words[1..].iter().filter(|w| !w.starts_with('-')).collect();
+    match (dirs.as_slice(), words[1..].iter().any(|w| w == "-")) {
+        (_, true) => Some(None),
+        ([], _) => Some(Some("~".into())),
+        ([dir], _) => Some(Some(dir.to_string())),
+        _ => Some(None),
+    }
+}
+
+/// The directories a git command's `-C` options name, in order (each relative to the one
+/// before); empty for any other command.
+pub fn git_dirs(cmd: &str) -> Vec<String> {
+    let words = command_words(cmd).unwrap_or_default();
+    let mut dirs = Vec::new();
+    if words.first().map(String::as_str) != Some("git") {
+        return dirs;
+    }
+    let mut rest = words[1..].iter();
+    while let Some(w) = rest.next() {
+        match w.as_str() {
+            "-C" => dirs.extend(rest.next().cloned()),
+            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+            | "--attr-source" => {
+                rest.next();
+            }
+            w if w.starts_with('-') => {}
+            _ => break,
+        }
+    }
+    dirs
 }
 
 /// A simple command without its redirects to /dev/null and between descriptors.
@@ -325,6 +378,14 @@ mod tests {
             assert!(GIT_COMMIT.is_match(cmd), "{cmd}");
         }
         assert!(!GIT_COMMIT.is_match("git log -S commit"));
+        assert_eq!(cd_target("ls x"), None);
+        assert_eq!(cd_target("cd"), Some(Some("~".into())));
+        assert_eq!(cd_target("cd -P '../a b'"), Some(Some("../a b".into())));
+        assert_eq!(cd_target("cd -"), Some(None));
+        assert_eq!(cd_target("cd a b"), Some(None));
+        assert_eq!(cd_target("cdx a"), None);
+        assert_eq!(git_dirs("A=1 git -c x=y -C ../b -C c --no-pager commit -C d"), ["../b", "c"]);
+        assert!(git_dirs("echo git -C x").is_empty());
         let c = without_discards("ls lib >/dev/null 2>&1 >> out 3>x <>y &>z >'a b'");
         assert_eq!(redirect_targets(&c), ["out", "x", "a"]);
     }

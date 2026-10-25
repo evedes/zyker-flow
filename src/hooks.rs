@@ -5,14 +5,14 @@ use crate::config::{given, Phase};
 use crate::deploy::{self, run_list};
 use crate::error::{bail, Error, Result};
 use crate::paths::flow_cmd;
-use crate::repo::{find_root, Repo};
+use crate::repo::{find_root, flow_root_of, Repo};
 use crate::shell::{
-    absolute_words, bash_commands, commits_index_only, redirect_targets, without_discards,
-    GIT_COMMIT, GIT_PUSH, MUTATES, USER_ONLY, USER_ONLY_CMD,
+    absolute_words, bash_commands, cd_target, commits_index_only, git_dirs, redirect_targets,
+    without_discards, GIT_COMMIT, GIT_PUSH, MUTATES, USER_ONLY, USER_ONLY_CMD,
 };
 use serde_json::{json, Value};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// The tools that run a shell `command` (Monitor streams its output as events).
@@ -72,13 +72,148 @@ pub fn session_start_input(stdin: io::Result<String>) -> Result<Option<String>> 
     session_start(object(serde_json::from_str(&stdin?)?)?)
 }
 
-/// The repo the payload's cwd (else ours) is in, when it uses flow.
-pub fn open_repo(payload: &Value) -> Result<Option<Repo>> {
-    let cwd = match payload.get("cwd").filter(given) {
+/// The session's working directory: the payload's cwd, else ours.
+fn session_dir(payload: &Value) -> Result<PathBuf> {
+    let dir = match payload.get("cwd").filter(given) {
         Some(cwd) => PathBuf::from(text(Some(cwd), "cwd")?),
         None => std::env::current_dir()?,
     };
-    find_root(&cwd)?.map(|root| Repo::open(&root)).transpose()
+    if !dir.is_dir() {
+        bail!("cwd {} is not a directory", dir.display());
+    }
+    Ok(dir)
+}
+
+/// The repo the session's working directory is in, when it uses flow.
+fn open_repo(payload: &Value) -> Result<Option<Repo>> {
+    flow_root_of(&session_dir(payload)?)?.map(|root| Repo::open(&root)).transpose()
+}
+
+/// A directory a command names (`~` expanded from $HOME), from `dir`; None when it
+/// depends on what only the shell knows (a variable, a substitution).
+fn locate(dir: &Path, word: &str) -> Option<PathBuf> {
+    let word = match word.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = std::env::var("HOME").ok().filter(|h| h.starts_with('/'))?;
+            format!("{home}{rest}")
+        }
+        _ => word.to_string(),
+    };
+    (!word.contains(['$', '`', '~'])).then(|| dir.join(word))
+}
+
+/// A flow repo a tool call touches, and what the call does to it.
+struct Target {
+    repo: Repo,
+    /// What a mutating command must not name: a state file, a rule file, a protected path.
+    names_state: regex::Regex,
+    names_rules: regex::Regex,
+    names_code: Option<regex::Regex>,
+    writes_state: bool,
+    writes_rules: bool,
+    writes_code: bool,
+    codegen: bool,
+    commits: bool,
+    pushes: bool,
+}
+
+impl Target {
+    fn open(root: &Path) -> Result<Target> {
+        let repo = Repo::open(root)?;
+        let work = regex::escape(&repo.work_rel);
+        let names_state = repo.names(&format!(r#"{work}/(?:flow\.json|[^/\s'"]+/state\.json)"#))?;
+        let names_rules = repo.names(&format!(
+            r"\.flow\.json|\.claude/settings(?:\.local)?\.json|{work}/(?:STANDING\.md|templates|specs)"
+        ))?;
+        let protected: Vec<String> = repo.protected.iter().map(|p| regex::escape(p)).collect();
+        let names_code = (!protected.is_empty()).then(|| repo.names(&protected.join("|")));
+        let names_code = names_code.transpose()?;
+        Ok(Target {
+            repo,
+            names_state,
+            names_rules,
+            names_code,
+            writes_state: false,
+            writes_rules: false,
+            writes_code: false,
+            codegen: false,
+            commits: false,
+            pushes: false,
+        })
+    }
+
+    /// Marks what writing `path` (relative to the root, or absolute) does here.
+    fn writes(&mut self, path: &str) {
+        let Some(rel) = self.repo.rel(path) else {
+            return;
+        };
+        self.writes_state |= self.repo.is_state_file(&rel);
+        self.writes_rules |= self.repo.is_rule_file(&rel);
+        self.writes_code |= self.repo.is_protected(&rel);
+    }
+
+    /// Why what the call does here is refused, if it is.
+    fn problem(&self, index_only: bool) -> Result<Option<String>> {
+        let repo = &self.repo;
+        if self.writes_state {
+            return Ok(Some(STATE_FILES.into()));
+        }
+        if self.writes_rules {
+            if let Some(problem) = rules_problem(repo)? {
+                return Ok(Some(problem));
+            }
+        }
+        if repo.load_global()?.paused() {
+            return Ok(None);
+        }
+        if self.commits {
+            if let Some(problem) = commit_problem(repo, index_only)? {
+                return Ok(Some(problem));
+            }
+        }
+        if self.pushes {
+            if let Some(problem) = push_problem(repo) {
+                return Ok(Some(problem));
+            }
+        }
+        if self.codegen || self.writes_code {
+            return code_edit_problem(repo);
+        }
+        Ok(None)
+    }
+}
+
+/// The flow repos a tool call touches, each opened once.
+#[derive(Default)]
+struct Targets {
+    open: Vec<Target>,
+    /// Each path looked up, and the flow repo root it is in.
+    roots: Vec<(PathBuf, Option<PathBuf>)>,
+}
+
+impl Targets {
+    /// The flow repo `path` is in, if any.
+    fn at(&mut self, path: &Path) -> Result<Option<&mut Target>> {
+        let root = match self.roots.iter().find(|(p, _)| p == path) {
+            Some((_, root)) => root.clone(),
+            None => {
+                let root = flow_root_of(path)?;
+                self.roots.push((path.to_path_buf(), root.clone()));
+                root
+            }
+        };
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        let i = match self.open.iter().position(|t| t.repo.root == root) {
+            Some(i) => i,
+            None => {
+                self.open.push(Target::open(&root)?);
+                self.open.len() - 1
+            }
+        };
+        Ok(Some(&mut self.open[i]))
+    }
 }
 
 pub fn deny_output(reason: &str) -> String {
@@ -166,11 +301,12 @@ fn any_match(patterns: &[fancy_regex::Regex], text: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// The reason to deny the tool call, or None to allow it.
+/// The reason to deny the tool call, or None to allow it. Each path and command is judged
+/// by the flow repo it acts in: an absolute path by the one it is in, a relative one by
+/// the one its command runs in (the session's working directory, after any `cd` before
+/// it and a git command's `-C`).
 fn pre_tool_use(payload: Value) -> Result<Option<String>> {
-    let Some(repo) = open_repo(&payload)? else {
-        return Ok(None);
-    };
+    let cwd = session_dir(&payload)?;
     let tool = payload.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let input = payload.get("tool_input").filter(given);
     let field = |key: &str| match input {
@@ -178,24 +314,29 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
         Some(v) => bail!("tool_input is not an object: {v}"),
         None => Ok(None),
     };
-    let paused = repo.load_global()?.paused();
+    let mut targets = Targets::default();
 
     if EDIT_TOOLS.contains(&tool) {
         let path = match field("file_path")?.filter(given) {
             Some(p) => Some(p),
             None => field("notebook_path")?.filter(given),
         };
-        let Some(rel) = repo.rel(text(path, "file_path")?) else {
+        let file = text(path, "file_path")?;
+        let at = if file.starts_with('/') { PathBuf::from(file) } else { cwd };
+        let Some(Target { repo, .. }) = targets.at(&at)? else {
+            return Ok(None);
+        };
+        let Some(rel) = repo.rel(file) else {
             return Ok(None);
         };
         if repo.is_state_file(&rel) {
             return Ok(Some(STATE_FILES.into()));
         }
         if repo.is_rule_file(&rel) {
-            return rules_problem(&repo);
+            return rules_problem(repo);
         }
-        if !paused && repo.is_protected(&rel) {
-            return code_edit_problem(&repo);
+        if !repo.load_global()?.paused() && repo.is_protected(&rel) {
+            return code_edit_problem(repo);
         }
         return Ok(None);
     }
@@ -204,61 +345,56 @@ fn pre_tool_use(payload: Value) -> Result<Option<String>> {
     }
 
     let cmds = bash_commands(text(field("command")?, "command")?);
-    if cmds.iter().any(|c| USER_ONLY_CMD.is_match(c)) {
-        let (names, cmd) = (USER_ONLY.join("/"), flow_cmd(&repo.root));
-        return Ok(Some(format!("{names} are the user's: they run them as `! {cmd} ...`")));
-    }
-    // What a mutating command must not name: a state file, a rule file, a protected path.
-    let work = regex::escape(&repo.work_rel);
-    let names_state = repo.names(&format!(r#"{work}/(?:flow\.json|[^/\s'"]+/state\.json)"#))?;
-    let names_rules = repo.names(&format!(
-        r"\.flow\.json|\.claude/settings(?:\.local)?\.json|{work}/(?:STANDING\.md|templates|specs)"
-    ))?;
-    let protected: Vec<String> = repo.protected.iter().map(|p| regex::escape(p)).collect();
-    let names_code = (!protected.is_empty()).then(|| repo.names(&protected.join("|")));
-    let names_code = names_code.transpose()?;
-    let (mut writes_state, mut writes_rules) = (false, false);
-    let (mut writes_code, mut codegen) = (false, false);
+    // Where the commands run: a `cd` moves the ones after it, unless it can't be followed
+    // (to a directory that isn't there, or one only the shell can work out).
+    let mut dir = cwd;
     for c in &cmds {
-        let c = without_discards(c);
-        let targets: Vec<String> =
-            redirect_targets(&c).iter().filter_map(|t| repo.rel(t)).collect();
-        writes_state |= targets.iter().any(|t| repo.is_state_file(t));
-        writes_rules |= targets.iter().any(|t| repo.is_rule_file(t));
-        writes_code |= targets.iter().any(|t| repo.is_protected(t));
-        if MUTATES.is_match(&c) {
-            // An absolute path names what it resolves to, symlinks and all.
-            let abs: Vec<String> = absolute_words(&c).iter().filter_map(|w| repo.rel(w)).collect();
-            writes_state |= names_state.is_match(&c) || abs.iter().any(|r| repo.is_state_file(r));
-            writes_rules |= names_rules.is_match(&c) || abs.iter().any(|r| repo.is_rule_file(r));
-            let code = names_code.as_ref().is_some_and(|re| re.is_match(&c));
-            writes_code |= code || abs.iter().any(|r| repo.is_protected(r));
+        let mut here = dir.clone();
+        for d in git_dirs(c) {
+            let Some(next) = locate(&here, &d) else { break };
+            here = next;
         }
-        codegen = codegen || any_match(&repo.codegen, &c)?;
+        let bare = without_discards(c);
+        if let Some(t) = targets.at(&here)? {
+            if USER_ONLY_CMD.is_match(c) {
+                let (names, cmd) = (USER_ONLY.join("/"), flow_cmd(&t.repo.root));
+                return Ok(Some(format!("{names} are the user's: they run them as `! {cmd} ...`")));
+            }
+            t.commits |= GIT_COMMIT.is_match(c);
+            t.pushes |= GIT_PUSH.is_match(c);
+            t.codegen = t.codegen || any_match(&t.repo.codegen, &bare)?;
+            if MUTATES.is_match(&bare) {
+                t.writes_state |= t.names_state.is_match(&bare);
+                t.writes_rules |= t.names_rules.is_match(&bare);
+                t.writes_code |= t.names_code.as_ref().is_some_and(|re| re.is_match(&bare));
+            }
+        }
+        // What it writes, each path in the repo it is in. An absolute path names what it
+        // resolves to, symlinks and all.
+        let mut written: Vec<String> =
+            redirect_targets(&bare).into_iter().map(String::from).collect();
+        if MUTATES.is_match(&bare) {
+            written.extend(absolute_words(&bare));
+        }
+        for w in written {
+            let at = if w.starts_with('/') { PathBuf::from(&w) } else { here.clone() };
+            if let Some(t) = targets.at(&at)? {
+                t.writes(&w);
+            }
+        }
+        if let Some(Some(to)) = cd_target(c) {
+            if let Some(to) = locate(&dir, &to).filter(|to| to.is_dir()) {
+                dir = to;
+            }
+        }
     }
-    if writes_state {
-        return Ok(Some(STATE_FILES.into()));
-    }
-    if writes_rules {
-        if let Some(problem) = rules_problem(&repo)? {
+    // A `cd` stages nothing: `cd ../b && git commit -m x` takes only what is staged.
+    let moves: Vec<String> = cmds.into_iter().filter(|c| cd_target(c).is_none()).collect();
+    let index_only = commits_index_only(&moves);
+    for t in &targets.open {
+        if let Some(problem) = t.problem(index_only)? {
             return Ok(Some(problem));
         }
-    }
-    if paused {
-        return Ok(None);
-    }
-    if cmds.iter().any(|c| GIT_COMMIT.is_match(c)) {
-        if let Some(problem) = commit_problem(&repo, commits_index_only(&cmds))? {
-            return Ok(Some(problem));
-        }
-    }
-    if cmds.iter().any(|c| GIT_PUSH.is_match(c)) {
-        if let Some(problem) = push_problem(&repo) {
-            return Ok(Some(problem));
-        }
-    }
-    if codegen || writes_code {
-        return code_edit_problem(&repo);
     }
     Ok(None)
 }

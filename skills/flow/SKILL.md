@@ -37,6 +37,11 @@ Never run the user-only commands, and never edit `<work>/flow.json` or
 and ask the user to run `! flow approve <kind>`, unless `flow status` lists the
 gate under "delegated to the judge": then run `flow judge` (see below).
 
+The hooks judge each edit and command by the repo it acts in, not the one the
+session started in: working on another flow repo (by absolute path, `cd` or
+`git -C`) runs into that repo's phase and rules, and its own `flow` commands
+are run there (`cd <repo> && flow status`).
+
 `.flow.json`, `.claude/settings.json`, `.claude/settings.local.json`,
 `<work>/templates/`, `<work>/STANDING.md` and `<work>/specs/` set the rules. While a feature is active the hooks deny editing them; propose the
 change and let the user make it. If a hook denies with

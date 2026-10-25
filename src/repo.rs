@@ -55,6 +55,28 @@ pub fn find_root(start: &Path) -> Result<Option<PathBuf>> {
     Ok(git_root(start)?.filter(|root| root.join(".flow.json").is_file()))
 }
 
+/// The flow repo `path` is in, symlinks resolved and from its nearest existing directory:
+/// the innermost git root around it with a .flow.json, past nested repos without one (a
+/// dependency checked out inside the tree).
+pub fn flow_root_of(path: &Path) -> Result<Option<PathBuf>> {
+    let mut dir = resolve(path);
+    while !dir.is_dir() {
+        if !dir.pop() {
+            return Ok(None);
+        }
+    }
+    while let Some(root) = git_root(&dir)? {
+        if root.join(".flow.json").is_file() {
+            return Ok(Some(root));
+        }
+        match root.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    Ok(None)
+}
+
 /// `s` in quotes, as flow's messages quote a pattern: single quotes, or double ones when
 /// `s` has a single quote and no double one; backslashes and that quote escaped.
 fn quote(s: &str) -> String {
