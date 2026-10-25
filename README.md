@@ -56,7 +56,7 @@ signatures. See [Known limitations](#known-limitations).
 
 ```
 Claude Code ──PreToolUse (Edit|Write|MultiEdit|NotebookEdit|Bash|Monitor)──> bin/flow hook pre-tool-use ──> allow / deny + reason
-            ──SessionStart──────────────────────────────────────────> bin/flow hook session-start ──> phase + blockers as context
+            ──SessionStart──────────────────────────────────────────> bin/flow hook session-start ──> phase + blockers + primer as context
 agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>/<NNN-slug>/state.json + artifacts
 ```
 
@@ -81,6 +81,14 @@ agent / user ──> bin/flow <command> ──> <work_dir>/flow.json, <work_dir>
   absolute or `~/` path that resolves into it; a `VAR=value` such as
   `MIX_ENV=test` names no path), `codegen` patterns, `git commit` and
   `git push`.
+- **Session-start hook.** In a flow repo, it gives the agent one status line
+  (the active feature, its phase and what blocks the next one, or that none is
+  active) and a primer, whether or not the skill gets loaded: what flow is and
+  what it holds the work to (approved intent, the exact code that passed gates
+  and review, the rule files, the user's commands), the repo's protected paths,
+  what to do in the current phase, the gates delegated to the judge, and to
+  keep the user told what flow is doing: the phase, each advance or back, what
+  blocks, which approval is needed, every denial and why.
 - **Fail closed.** If the pre-tool-use hook fails (an error, a panic, a
   payload of the wrong shape, no binary to run), it denies the call with
   `hook error: …` instead of allowing it. Claude Code always sends a JSON
@@ -327,7 +335,7 @@ In the plugin:
 | `.claude-plugin/plugin.json` | plugin manifest (`flow`; no `version`, see `AGENTS.md`) |
 | `.claude-plugin/marketplace.json` | the one-plugin marketplace `zyker-flow` (`source: "."`) |
 | `bin/flow` | the launcher (POSIX sh): finds or fetches the flow binary and runs it (see [The flow binary](#the-flow-binary)) |
-| `src/`, `Cargo.toml`, `Cargo.lock` | the CLI and both hooks, in Rust (one binary, `flow`; `templates/` are compiled in): `main.rs` dispatches, `commands.rs` and `hooks.rs` are the entry points, `checks.rs` what each phase needs, `shell.rs` reads Bash commands, `markdown.rs` the artifacts, `specs.rs` the living spec, `judge.rs` `flow judge` (its brief in `judge.md`), `config.rs` the JSON files, `repo.rs` the repo and its fingerprints, `deploy.rs` CI runs and the health check, `paths.rs` and `error.rs` the rest |
+| `src/`, `Cargo.toml`, `Cargo.lock` | the CLI and both hooks, in Rust (one binary, `flow`; `templates/` are compiled in): `main.rs` dispatches, `commands.rs` and `hooks.rs` are the entry points, `checks.rs` what each phase needs, `shell.rs` reads Bash commands, `markdown.rs` the artifacts, `specs.rs` the living spec, `judge.rs` `flow judge` (its brief in `judge.md`), `config.rs` the JSON files, `repo.rs` the repo and its fingerprints, `deploy.rs` CI runs and the health check, `primer.rs` what the session-start hook tells the agent, `paths.rs` and `error.rs` the rest |
 | `rustfmt.toml` | `cargo fmt` settings |
 | `.github/workflows/` | `ci.yml` (fmt, clippy and every test suite on Linux and macOS; the release pin on main) and `release.yml` (the four release binaries) |
 | `VERSION`, `SHA256SUMS` | the release bin/flow runs, and its pinned checksums (see [Releasing](#releasing)) |

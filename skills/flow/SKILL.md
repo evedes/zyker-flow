@@ -37,6 +37,14 @@ Never run the user-only commands, and never edit `<work>/flow.json` or
 and ask the user to run `! flow approve <kind>`, unless `flow status` lists the
 gate under "delegated to the judge": then run `flow judge` (see below).
 
+Keep the user told what flow is doing, in a line or two each time: which phase
+the work is in and what that allows, each `flow advance` or `flow back` and
+why, what blocks the next phase, which approval you need from them and what it
+binds (the exact spec, tickets or code, until they change), and every hook
+denial with its reason. A denial is flow holding the work to what was agreed:
+fix its cause or ask the user, never route around it. The session-start hook
+gives you the same summary, with the phase and what blocks it.
+
 The hooks judge each edit and command by the repo it acts in, not the one the
 session started in: working on another flow repo (by absolute path, `cd` or
 `git -C`) runs into that repo's phase and rules, and its own `flow` commands
@@ -74,9 +82,9 @@ has them, else the plugin's. `TODO(flow)` marks unfilled template text;
 `flow check` fails while any remain, or while a section the template seeded
 with one is missing or empty.
 
-1. **explore** — fill `research.md`. Read the living spec (`<work>/specs/*.md`,
-   how the system behaves now, one `## <requirement>` per requirement) and the
-   code before proposing anything;
+1. **explore** — fill `research.md`. Read the living spec (`<work>/specs/*.md`, if
+   there is one: how the system behaves now, one `## <requirement>` per
+   requirement) and the code before proposing anything;
    use a subagent (Explore) for wide reading so findings come back distilled.
    Put decisions only the user can make under `## Open questions` as `- [ ]`
    items, then stop and ask. Tick them (`- [x]`) with the answer once given.
@@ -99,7 +107,8 @@ with one is missing or empty.
    the tickets alone once approved: `flow gates` and every later phase refuse
    until they are restored or approved again (`flow back` to that phase).
 4. **build** — per ticket, write the failing test from its acceptance criteria
-   first, then the code, then check it in the running app. When all tickets
+   first, then the code, then check it in the running app (how to run it is in
+   the repo's `AGENTS.md`; if it isn't, ask the user and propose adding it). When all tickets
    are done, `flow gates` must pass. Any later change to a file git sees
    outside `<work>` makes the gates stale, docs and untracked scratch files
    included: finish those before `flow gates`, and keep scratch output out of

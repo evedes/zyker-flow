@@ -4,7 +4,7 @@ This repo (`~/Work/zyker-flow`, GitHub `evedes/zyker-flow`) is the
 zyker-flow marketplace. It holds `flow`, a Claude Code plugin: a
 phase-gated feature workflow whose order is enforced by hooks. `README.md`
 describes what it does, how it works and how repos use it, and lists its
-known limitations. `CLAUDE.md` is a symlink to this file.
+known limitations. Claude Code reads this file directly (no `CLAUDE.md`).
 
 - The implementation is the Rust crate at the root (`src/`, one binary `flow`;
   `templates/` are compiled in; README's "Files" names each module).
@@ -42,7 +42,8 @@ known limitations. `CLAUDE.md` is a symlink to this file.
   unbumped version string. `VERSION` is the flow binary's release, not the
   plugin's version.
 - The user's `~/.local/bin/flow` wrapper execs this checkout's `bin/flow`.
-- Repos using it (the ones `scripts/smoke` finds): atomize, zyker and zyker-cloud
-  (`~/Work/atomize`, `~/Work/zyker`, `~/Work/zyker-cloud`).
+- Repos using it: every `~/Work` repo with a `.flow.json` (the ones
+  `scripts/smoke` finds; `ls ~/Work/*/.flow.json` lists them), among them
+  atomize, zyker and zyker-cloud.
 - When a behaviour changes, update `README.md` and `skills/flow/SKILL.md` in
   the same commit: the skill is what the agent reads in every flow repo.

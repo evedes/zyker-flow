@@ -5,6 +5,7 @@ use crate::config::{given, Phase};
 use crate::deploy::{self, run_list};
 use crate::error::{bail, Error, Result};
 use crate::paths::flow_cmd;
+use crate::primer::primer;
 use crate::repo::{find_root, flow_root_of, Repo};
 use crate::shell::{
     absolute_words, bash_commands, cd_target, commits_index_only, git_dirs, redirect_targets,
@@ -406,13 +407,13 @@ fn session_start(payload: Value) -> Result<Option<String>> {
     };
     // A missing state file of the active feature is reported, not an error.
     let active = repo.active().map_err(|e| format!("flow: {e}."));
-    let mut ctx = match active {
-        Err(broken) => broken,
+    let mut ctx = match &active {
+        Err(broken) => broken.clone(),
         Ok(Some((fid, st))) => {
             let mut ctx =
                 format!("flow: active feature {fid} ({}) is in phase {}.", st.title, st.phase);
             let problems =
-                if st.phase == Phase::Ship { Vec::new() } else { check(&repo, &fid, &st, true)? };
+                if st.phase == Phase::Ship { Vec::new() } else { check(&repo, fid, st, true)? };
             if !problems.is_empty() {
                 ctx += &format!(" To advance: {}", problems.join("; "));
             }
@@ -428,6 +429,9 @@ fn session_start(payload: Value) -> Result<Option<String>> {
     if repo.load_global()?.paused() {
         ctx += " Enforcement is PAUSED.";
     }
+    let active = active.as_ref().ok().and_then(|a| a.as_ref()).map(|(f, st)| (f.as_str(), st));
+    ctx += "\n\n";
+    ctx += &primer(&repo, active);
     let out =
         json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}});
     Ok(Some(out.to_string()))

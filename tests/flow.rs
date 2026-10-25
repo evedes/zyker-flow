@@ -963,6 +963,74 @@ fn session_start_reports_phase() {
     assert_in("explore", ctx);
 }
 
+/// The context the session-start hook gives the agent.
+fn session_context(t: &Flow) -> String {
+    let r = t.hook_raw("session-start", json!({"cwd": t.root}).to_string());
+    let ctx = &parse(&r.stdout)["hookSpecificOutput"]["additionalContext"];
+    ctx.as_str().unwrap_or_else(|| panic!("no context: {}", r.stdout)).to_string()
+}
+
+#[test]
+fn session_start_primes_the_agent() {
+    let t = Flow::new();
+    let cmd = flow_bin().display().to_string();
+    let ctx = session_context(&t);
+    for line in [
+        &format!(
+            "flow: no active feature. Code changes start with `{cmd} new <slug> \"<title>\"`.\n\n"
+        ),
+        "\nThis repo uses flow, a phase-gated feature workflow (explore -> spec -> tickets -> \
+         build -> review -> ship -> done)",
+        "Load the flow:flow skill before starting or continuing any change here.\n",
+        "\nWhat flow keeps aligned:\n- Intent: ",
+        "\n- Rules: while a feature is active, .flow.json, .claude/settings.json, \
+         .claude/settings.local.json, work/STANDING.md, work/templates/ and work/specs/",
+        "never edit work/flow.json or work/*/state.json",
+        "\nProtected code here: lib, mix.exs. It is edited only in build and committed only \
+         in ship.",
+        "\nNow (no active feature): ",
+        &format!("run `{cmd} new <slug> \"<title>\"`: that starts a feature in explore"),
+        "\nKeep the user in the loop on flow: ",
+        "every flow hook denial with its reason",
+    ] {
+        assert_in(line, &ctx);
+    }
+
+    // What to do now follows the phase, and the gates the user delegated.
+    t.flow(&["new", "hello", "Hello"]);
+    let ctx = session_context(&t);
+    assert_in("\nNow (explore): fill work/001-hello/research.md. ", &ctx);
+    assert!(!ctx.contains("Delegated to the judge"), "{ctx}");
+    t.fwrite("research.md", RESEARCH);
+    t.flow(&["advance"]);
+    assert_in(
+        &format!("then ask the user for `! {cmd} approve spec`. No code edits yet."),
+        &session_context(&t),
+    );
+    t.flow(&["delegate", "spec", "review"]);
+    let ctx = session_context(&t);
+    assert_in(&format!("Present it, then run `{cmd} judge`. No code edits yet."), &ctx);
+    assert_in(
+        &format!("\nDelegated to the judge: spec, review. For those, run `{cmd} judge`"),
+        &ctx,
+    );
+
+    let t = Flow::new();
+    t.to_build();
+    assert_in("\nNow (build): per ticket, write the failing test first", &session_context(&t));
+    let t = Flow::new();
+    t.to_ship();
+    let ctx = session_context(&t);
+    assert_in(
+        &format!(
+            "\nNow (ship): commit the code together with work/001-hello/, then `{cmd} advance`"
+        ),
+        &ctx,
+    );
+    t.configure(json!({"protected_paths": []}));
+    assert_in("\nProtected code: none is configured in .flow.json.\n", &session_context(&t));
+}
+
 // --- messages, exit codes, state files and hashes ----------------------------------
 
 /// The strings of a JSON array.
@@ -1144,11 +1212,14 @@ fn non_ascii_titles_are_written_as_utf8() {
         parse(&r.stdout),
         json!({"hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": "flow: active feature 001-hello (Olá ☃ 𝄞) is in phase explore. \
-                To advance: research.md: still contains TODO(flow) placeholders; research.md: \
-                1 unanswered item(s) in '## open questions'",
+            "additionalContext": session_context(&t),
         }})
     );
+    assert!(session_context(&t).starts_with(
+        "flow: active feature 001-hello (Olá ☃ 𝄞) is in phase explore. To advance: \
+         research.md: still contains TODO(flow) placeholders; research.md: 1 unanswered \
+         item(s) in '## open questions'\n\n"
+    ));
     let payload = json!({
         "cwd": t.root, "tool_name": "Write",
         "tool_input": {"file_path": t.path("work/flow.json")},

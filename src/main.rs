@@ -27,6 +27,7 @@ mod hooks;
 mod judge;
 mod markdown;
 mod paths;
+mod primer;
 mod repo;
 mod shell;
 mod specs;
