@@ -1,6 +1,6 @@
 # Known limitations
 
-Open defects, found in the 2026-10-18 review; each needs a fix and a test.
+Open defects; each needs a fix and a test.
 
 ## Enforcement
 
@@ -18,7 +18,8 @@ Open defects, found in the 2026-10-18 review; each needs a fix and a test.
 - Without a `deploy` section, ship→done only checks that the tree is clean,
   not that the reviewed code is what was committed.
 - Only `git commit` (and `commit-tree`) is gated; `merge`, `cherry-pick`,
-  `revert`, `am`, `rebase` and `pull` are not.
+  `revert`, `am`, `rebase` and `pull` are not, nor a commit through a git alias
+  (`git ci`, `git -c alias.x=commit x`).
 - Bash write detection misses `&>`/`&>>` and `>|` redirects, git commands that
   rewrite code without naming it (`git restore .`, `git reset --hard`), and
   `cd dir && …` into a protected path, resolves relative paths against the git
