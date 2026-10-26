@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/flow.svg" alt="FLOW" width="468">
+<img src=".github/flow.svg?v=2" alt="FLOW" width="468">
 
 **`flow`** — a phase-gated feature workflow for Claude Code.
 
@@ -112,7 +112,7 @@ the phases, and stops when it needs you:
 ## `> the phases`
 
 <p align="center">
-  <img src=".github/phases.svg" alt="explore → spec → tickets → build → review → ship → done; review can go back to build" width="880">
+  <img src=".github/phases.svg?v=2" alt="explore → spec → tickets → build → review → ship → done; review can go back to build" width="880">
 </p>
 
 | phase       | the agent                                                              | moves on when                                     |
