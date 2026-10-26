@@ -20,6 +20,19 @@
 
 ---
 
+## `> the problem`
+
+Tell a coding agent to research first, write a spec, get it approved, test,
+then commit, and it will, until it doesn't. Halfway through a long session,
+after a compaction, or on a change that looks like one line, it starts
+writing code before anyone agreed on what to build, or commits work that was
+never reviewed. Instructions in a prompt are suggestions. You only find out
+it skipped a step when you read the diff.
+
+flow turns the process into rules the agent can't skip.
+
+---
+
 ## `> what it is`
 
 Every feature moves through the same phases, in order:
