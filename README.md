@@ -111,19 +111,9 @@ the phases, and stops when it needs you:
 
 ## `> the phases`
 
-```mermaid
-flowchart LR
-    explore --> spec
-    spec -- "you approve" --> tickets
-    tickets -- "you approve" --> build
-    build -- "gates pass" --> review
-    review -- "verdict: pass" --> ship
-    review -. "fail: flow back" .-> build
-    ship -- "CI green" --> done
-
-    classDef flow stroke:#EAB308,stroke-width:2px
-    class explore,spec,tickets,build,review,ship,done flow
-```
+<p align="center">
+  <img src=".github/phases.svg" alt="explore → spec → tickets → build → review → ship → done; review can go back to build" width="880">
+</p>
 
 | phase       | the agent                                                              | moves on when                                     |
 |-------------|------------------------------------------------------------------------|---------------------------------------------------|
