@@ -1,45 +1,45 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 296" width="880" height="296" role="img" aria-label="explore, spec, tickets, build, review, ship, done">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FDE047"/>
-      <stop offset="1" stop-color="#EAB308"/>
+      <stop offset="0" stop-color="#A7F3D0"/>
+      <stop offset="1" stop-color="#34D399"/>
     </linearGradient>
-    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#CA8A04"/></marker>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#059669"/></marker>
     <marker id="f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8B949E"/></marker>
   </defs>
   <style>
-    .n { font: 700 19px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #422006 }
-    .s { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #713F12 }
-    .l { font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #CA8A04 }
+    .n { font: 700 19px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #064E3B }
+    .s { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #065F46 }
+    .l { font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #059669 }
     .x { font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #8B949E }
-    .e { stroke: #CA8A04; stroke-width: 2.5; fill: none }
+    .e { stroke: #059669; stroke-width: 2.5; fill: none }
     .d { stroke: #8B949E; stroke-width: 2; stroke-dasharray: 6 5; fill: none }
   </style>
-  <rect x="24" y="38" width="150" height="66" rx="6" fill="none" stroke="#A16207" stroke-width="1.5"/>
+  <rect x="24" y="38" width="150" height="66" rx="6" fill="none" stroke="#047857" stroke-width="1.5"/>
   <rect x="20" y="34" width="150" height="66" rx="6" fill="url(#g)"/>
   <text class="n" x="95.0" y="63" text-anchor="middle">explore</text>
   <text class="s" x="95.0" y="84" text-anchor="middle">research.md</text>
-  <rect x="254" y="38" width="150" height="66" rx="6" fill="none" stroke="#A16207" stroke-width="1.5"/>
+  <rect x="254" y="38" width="150" height="66" rx="6" fill="none" stroke="#047857" stroke-width="1.5"/>
   <rect x="250" y="34" width="150" height="66" rx="6" fill="url(#g)"/>
   <text class="n" x="325.0" y="63" text-anchor="middle">spec</text>
   <text class="s" x="325.0" y="84" text-anchor="middle">spec.md</text>
-  <rect x="484" y="38" width="150" height="66" rx="6" fill="none" stroke="#A16207" stroke-width="1.5"/>
+  <rect x="484" y="38" width="150" height="66" rx="6" fill="none" stroke="#047857" stroke-width="1.5"/>
   <rect x="480" y="34" width="150" height="66" rx="6" fill="url(#g)"/>
   <text class="n" x="555.0" y="63" text-anchor="middle">tickets</text>
   <text class="s" x="555.0" y="84" text-anchor="middle">tickets/*.md</text>
-  <rect x="714" y="38" width="150" height="66" rx="6" fill="none" stroke="#A16207" stroke-width="1.5"/>
+  <rect x="714" y="38" width="150" height="66" rx="6" fill="none" stroke="#047857" stroke-width="1.5"/>
   <rect x="710" y="34" width="150" height="66" rx="6" fill="url(#g)"/>
   <text class="n" x="785.0" y="63" text-anchor="middle">build</text>
   <text class="s" x="785.0" y="84" text-anchor="middle">tests + code</text>
-  <rect x="714" y="208" width="150" height="66" rx="6" fill="none" stroke="#A16207" stroke-width="1.5"/>
+  <rect x="714" y="208" width="150" height="66" rx="6" fill="none" stroke="#047857" stroke-width="1.5"/>
   <rect x="710" y="204" width="150" height="66" rx="6" fill="url(#g)"/>
   <text class="n" x="785.0" y="233" text-anchor="middle">review</text>
   <text class="s" x="785.0" y="254" text-anchor="middle">review.md</text>
-  <rect x="484" y="208" width="150" height="66" rx="6" fill="none" stroke="#A16207" stroke-width="1.5"/>
+  <rect x="484" y="208" width="150" height="66" rx="6" fill="none" stroke="#047857" stroke-width="1.5"/>
   <rect x="480" y="204" width="150" height="66" rx="6" fill="url(#g)"/>
   <text class="n" x="555.0" y="233" text-anchor="middle">ship</text>
   <text class="s" x="555.0" y="254" text-anchor="middle">commit · push</text>
-  <rect x="254" y="208" width="150" height="66" rx="6" fill="none" stroke="#A16207" stroke-width="1.5"/>
+  <rect x="254" y="208" width="150" height="66" rx="6" fill="none" stroke="#047857" stroke-width="1.5"/>
   <rect x="250" y="204" width="150" height="66" rx="6" fill="url(#g)"/>
   <text class="n" x="325.0" y="233" text-anchor="middle">done</text>
   <text class="s" x="325.0" y="254" text-anchor="middle">specs/ merged</text>
