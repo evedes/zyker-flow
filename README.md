@@ -42,8 +42,7 @@ explore -> spec -> tickets -> build -> review -> ship -> done
 ```
 
 The `flow` CLI owns the state, and a hook checks every edit and shell command
-against it. The agent can't write code before what it's building has been
-approved, and can't commit code that hasn't passed the gates and review.
+against it.
 
 Repos opt in with a `.flow.json` at the git root. Everywhere else the hooks do
 nothing.
