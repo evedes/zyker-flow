@@ -1,8 +1,12 @@
 name: ci
 
+# A push or pull request that only touches these docs runs nothing. Not `**.md`:
+# templates/*.md are compiled in, and skills/flow/SKILL.md is behaviour.
 on:
   push:
+    paths-ignore: [README.md, AGENTS.md, docs/**, .github/*.svg]
   pull_request:
+    paths-ignore: [README.md, AGENTS.md, docs/**, .github/*.svg]
 
 permissions:
   contents: read

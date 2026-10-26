@@ -1,34 +1,58 @@
-# flow
+<div align="center">
 
-**A phase-gated feature workflow for Claude Code.** Every feature moves
-through the same phases, in order:
+<img src=".github/flow.svg" alt="FLOW" width="468">
+
+**`flow`** — a phase-gated feature workflow for Claude Code.
+
+*enforced by hooks, not by prompts: the agent can't skip a step.*
+
+<br>
+
+[![CI](https://github.com/evedes/zyker-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/evedes/zyker-flow/actions/workflows/ci.yml)
+
+![Claude Code](https://img.shields.io/badge/claude_code-plugin-000?style=for-the-badge&logo=anthropic&logoColor=white)
+![Rust](https://img.shields.io/badge/rust-1.85-000?style=for-the-badge&logo=rust&logoColor=white)
+![Linux](https://img.shields.io/badge/linux-x86__64_·_aarch64-000?style=for-the-badge&logo=linux&logoColor=white)
+![macOS](https://img.shields.io/badge/macos-x86__64_·_aarch64-000?style=for-the-badge&logo=apple&logoColor=white)
+![POSIX](https://img.shields.io/badge/posix-sh-000?style=for-the-badge&logo=gnubash&logoColor=white)
+
+</div>
+
+---
+
+## `> what it is`
+
+Every feature moves through the same phases, in order:
 
 ```
 explore -> spec -> tickets -> build -> review -> ship -> done
 ```
 
-The order is enforced by code, not by instructions. The `flow` CLI owns the
-state, and a hook checks every edit and shell command against it. So the agent
-can't write code before you've approved what it's building, and can't commit
-code that hasn't passed the gates and review.
+The `flow` CLI owns the state, and a hook checks every edit and shell command
+against it. The agent can't write code before what it's building has been
+approved, and can't commit code that hasn't passed the gates and review.
 
 Repos opt in with a `.flow.json` at the git root. Everywhere else the hooks do
 nothing.
 
-## What you get
+---
+
+## `> what you get`
 
 - **Code changes only in build.** Files under your `protected_paths` can't be
   edited, overwritten from the shell or regenerated in any other phase.
-- **Commits only in ship.** A `git commit` goes through only once you have
-  approved the spec and tickets and both the gates and the review have passed,
-  all on the exact code being committed (a content fingerprint).
-- **Approvals stick to what you approved.** An approval is bound to the
+- **Commits only in ship.** A `git commit` goes through only once the spec and
+  tickets are approved and both the gates and the review have passed, all on
+  the exact code being committed (a content fingerprint).
+- **Approvals stick to what was approved.** An approval is bound to the
   artifact's content, so editing an approved spec or ticket voids it.
 - **The rules stay fixed.** While a feature is active, the agent can't edit
   `.flow.json`, the Claude settings, the standing agreement, the templates or
   the living spec.
-- **You keep the keys.** Only you can approve, delegate, pause, resume or
-  abandon. The agent can't run those commands or edit flow's state files.
+- **You keep the keys.** Only you can approve, pause, resume or abandon, and
+  the agent can't edit flow's state files. You can hand the spec, tickets or
+  review approval to a read-only [judge](#-the-judge), and take it back at any
+  time.
 - **A living spec.** `<work_dir>/specs/` describes how the system behaves now.
   Each feature declares what it changes in it, and flow merges those changes
   when the feature is done.
@@ -37,27 +61,26 @@ nothing.
 
 Changes that touch no protected path (docs, CI, tooling) are never blocked.
 
-> flow keeps a **cooperative** agent in phase. It is not a sandbox against a
-> hostile one: anything the agent can run can get past a pattern match, and
-> approvals are content hashes, not signatures. Hooks can't judge quality
-> either, so a thin spec can still pass the checks. Your approvals and the
-> fresh-context review cover that. See [Known limitations](docs/limitations.md).
+> **not a sandbox.** flow keeps a *cooperative* agent in phase. Anything the
+> agent can run can get past a pattern match, and approvals are content
+> hashes, not signatures. Hooks can't judge quality either, so a thin spec can
+> still pass the checks; approvals and the fresh-context review cover that.
+> See [known limitations](docs/limitations.md).
 
-## Quick start
+---
 
-You need git and a POSIX sh, on Linux or macOS. Rust is only needed on other
-platforms (see [Installing](docs/installing.md)).
+## `> boot sequence`
 
-**1. Install the plugin** (once per machine):
+Needs git and a POSIX sh. On Linux and macOS the release binary is fetched on
+first use; elsewhere it builds with cargo ([installing](docs/installing.md)).
 
 ```sh
 git clone https://github.com/evedes/zyker-flow.git ~/zyker-flow
-claude plugin marketplace add ~/zyker-flow
+claude plugin marketplace add ~/zyker-flow     # once per machine
 claude plugin install flow@zyker-flow
 ```
 
-**2. Put `flow` on your PATH**, so you can run it from a terminal and with
-Claude Code's `!` prefix:
+Put `flow` on your PATH, for terminals and Claude Code's `!` prefix:
 
 ```sh
 #!/bin/sh
@@ -65,70 +88,100 @@ Claude Code's `!` prefix:
 exec "$HOME/zyker-flow/bin/flow" "$@"
 ```
 
-**3. Opt a repo in**, at its root:
+Opt a repo in, at its root:
 
 ```sh
-flow init
+flow init        # .flow.json · flow/STANDING.md · permission deny rules
 ```
 
-This writes `.flow.json` (with guessed settings for Elixir, Rust, Python or
-Node), `flow/STANDING.md` (your standing Definition of Ready/Done) and the
-permission deny rules. Check both files and commit them.
+`flow init` guesses the settings for Elixir, Rust, Python or Node. Check
+`.flow.json` and `flow/STANDING.md` (your standing Definition of Ready/Done),
+then commit them. If the repo already has code, ask Claude to write the
+[living spec](docs/living-spec.md) before the first feature.
 
-If the repo already has code, ask Claude to write the living spec before the
-first feature. The skill knows the steps (see
-[The living spec](docs/living-spec.md)).
-
-**4. Work as usual.** Ask Claude for a feature. It runs `flow new` and works
-through the phases, stopping when it needs you:
+Then work as usual. Ask Claude for a feature: it runs `flow new`, works through
+the phases, and stops when it needs you:
 
 ```
 ! flow approve spec
 ! flow approve tickets
 ```
 
-## The phases
+---
 
-| Phase | What the agent does | What moves it on |
-|---|---|---|
-| **explore** | reads the code and living spec, then writes `research.md` | its open questions are answered |
-| **spec** | writes `spec.md`: behaviour, acceptance criteria, changes to the living spec | you run `! flow approve spec` |
-| **tickets** | splits the spec into `tickets/T01-….md`, each with verification commands | you run `! flow approve tickets` |
-| **build** | writes the tests, then the code; the only phase where code can change | `flow gates` passes (standing gates + every ticket's checks) |
-| **review** | a fresh subagent reviews the diff against the spec, in `review.md` | the verdict is `pass` |
-| **ship** | commits, and pushes if a deploy is configured | CI is green and the health check passes (or, with no deploy, everything is committed) |
-| **done** | flow merges the spec changes into the living spec and commits them | — |
+## `> the phases`
+
+```mermaid
+flowchart LR
+    explore --> spec
+    spec -- "you approve" --> tickets
+    tickets -- "you approve" --> build
+    build -- "gates pass" --> review
+    review -- "verdict: pass" --> ship
+    review -. "fail: flow back" .-> build
+    ship -- "CI green" --> done
+
+    classDef flow stroke:#EAB308,stroke-width:2px
+    class explore,spec,tickets,build,review,ship,done flow
+```
+
+| phase       | the agent                                                              | moves on when                                     |
+|-------------|------------------------------------------------------------------------|---------------------------------------------------|
+| **explore** | reads the code and living spec, writes `research.md`                   | its open questions are answered                   |
+| **spec**    | writes `spec.md`: behaviour, acceptance criteria, living-spec changes  | you run `! flow approve spec`                     |
+| **tickets** | splits the spec into `tickets/T01-….md`, each with verification commands | you run `! flow approve tickets`                |
+| **build**   | tests first, then code; the only phase where code can change           | `flow gates` passes (standing gates + ticket checks) |
+| **review**  | a fresh subagent reviews the diff against the spec, in `review.md`     | the verdict is `pass`                             |
+| **ship**    | commits, and pushes if a deploy is configured                          | CI is green and the health check passes, or, with no deploy, everything is committed |
+| **done**    | flow merges the spec changes into the living spec and commits them     | —                                                 |
 
 A phase can't be left until its artifact is complete: every required section
 is filled in and no `TODO(flow)` placeholders are left. The agent can always
 `flow back` a phase, for example when review finds a problem.
 
-Instead of approving yourself, you can hand spec, tickets or review to a
-read-only **judge** (a fresh Claude):
-`! flow delegate spec tickets review`. See [The judge](docs/judge.md).
+---
 
-## Commands
+## `> the judge`
 
-| Command | Who | What |
-|---|---|---|
-| `flow init` | you | opt the repo in |
-| `flow status`, `flow check` | anyone | where things are, and what blocks the next phase |
-| `flow new <slug> ["<title>"]` | agent | start a feature (one at a time) |
-| `flow advance`, `flow back` | agent | move forward or back one phase |
-| `flow gates` | agent | in build: run the gates and record the result |
-| `flow judge` | agent | in a delegated gate: have the judge decide |
-| `flow deploy` | anyone | recent CI runs and the health check |
-| `flow approve spec\|tickets\|review` | **you** | approve the current artifact (for review, the code as it is now) |
-| `flow delegate <gates…>`, `flow delegate off` | **you** | let the judge pass gates for this feature, or stop it |
-| `flow pause`, `flow resume` | **you** | suspend or restore enforcement |
-| `flow abandon` | **you** | drop the active feature |
+You don't have to approve every gate yourself. Hand spec, tickets or review to
+a judge, a fresh, read-only Claude that sees only the artifacts:
 
-Run your commands with the `!` prefix in Claude Code (`! flow approve spec`) or
-from a terminal. `!` commands bypass the hooks, which is why only you can run
-them. A slash command can't do the same job, because it runs through the
-agent's tools and the hook blocks them.
+```
+! flow delegate spec tickets review     # for the active feature
+! flow delegate off                     # take it back
+```
 
-## Configuration
+The judge approves, rejects with findings, or asks you a question. Its
+approval binds to the same content hash yours would. After three rejections
+the gate comes back to you. Your own `flow approve` keeps working either way.
+[More on the judge](docs/judge.md).
+
+---
+
+## `> commands`
+
+| command                                   | who        | what                                                          |
+|-------------------------------------------|------------|---------------------------------------------------------------|
+| `flow init`                               | you        | opt the repo in                                               |
+| `flow status` · `flow check`              | anyone     | where things are, and what blocks the next phase              |
+| `flow new <slug> ["<title>"]`             | agent      | start a feature (one at a time)                               |
+| `flow advance` · `flow back`              | agent      | move forward or back one phase                                |
+| `flow gates`                              | agent      | in build: run the gates and record the result                 |
+| `flow judge`                              | agent      | in a delegated gate: have the judge decide                    |
+| `flow deploy`                             | anyone     | recent CI runs and the health check                           |
+| `flow approve spec\|tickets\|review`      | **you**    | approve the current artifact (for review, the code as it is now) |
+| `flow delegate <gates…>` · `off`          | **you**    | let the judge pass gates for this feature, or stop it         |
+| `flow pause` · `flow resume`              | **you**    | suspend or restore enforcement                                |
+| `flow abandon`                            | **you**    | drop the active feature                                       |
+
+Run yours with the `!` prefix in Claude Code (`! flow approve spec`) or from a
+terminal. `!` commands bypass the hooks, which is why only you can run them. A
+slash command can't do the same job, because it runs through the agent's tools
+and the hook blocks them.
+
+---
+
+## `> config`
 
 A minimal `.flow.json`:
 
@@ -141,23 +194,37 @@ A minimal `.flow.json`:
 }
 ```
 
-- `protected_paths`: what counts as code.
-- `standing_gates`: commands every feature must pass.
-- `codegen`: regexes for commands that write code without naming the files.
-- `deploy` (optional): hooks up Forgejo, GitHub Actions or a custom command,
-  so pushes wait for CI and ship waits for green.
+| key               | signal                                                                 |
+|-------------------|------------------------------------------------------------------------|
+| `protected_paths` | what counts as code                                                    |
+| `standing_gates`  | commands every feature must pass                                       |
+| `codegen`         | regexes for commands that write code without naming the files          |
+| `deploy`          | optional: Forgejo, GitHub Actions or a custom command; pushes wait for running CI, ship waits for green |
+| `judge`           | optional: the judge's model and budget                                 |
 
-See [Configuration](docs/configuration.md) for every key, the deploy
-providers and template overrides.
+Every key, the deploy providers and template overrides:
+[configuration](docs/configuration.md).
 
-## Documentation
+---
 
-- [Installing](docs/installing.md): the plugin, the `flow` binary, updates
-- [Configuration](docs/configuration.md): `.flow.json`, deploy providers,
-  templates, per-repo files
-- [Enforcement](docs/enforcement.md): exactly what the hooks check, and how
-- [The judge](docs/judge.md): delegating approvals
-- [The living spec](docs/living-spec.md): `specs/`, spec changes, adopting
-  flow in an existing repo
-- [Known limitations](docs/limitations.md)
-- [Development](docs/development.md): source layout, tests, releasing
+## `> docs`
+
+| page                                       | what's in it                                              |
+|--------------------------------------------|-----------------------------------------------------------|
+| [installing](docs/installing.md)           | the plugin, the `flow` binary, updates                    |
+| [configuration](docs/configuration.md)     | `.flow.json`, deploy providers, templates, per-repo files |
+| [enforcement](docs/enforcement.md)         | exactly what the hooks check, and how                     |
+| [the judge](docs/judge.md)                 | delegating approvals                                      |
+| [the living spec](docs/living-spec.md)     | `specs/`, spec changes, adopting flow in an existing repo |
+| [known limitations](docs/limitations.md)   | what flow doesn't catch yet                               |
+| [development](docs/development.md)         | source layout, tests, releasing                           |
+
+---
+
+<div align="center">
+
+<sub>zyker-flow · made by <a href="https://github.com/evedes">@evedes</a></sub>
+
+🇵🇹 &nbsp; 🇪🇺
+
+</div>
