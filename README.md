@@ -154,8 +154,11 @@ a judge, a fresh, read-only Claude that sees only the artifacts:
 ```
 
 The judge approves, rejects with findings, or asks you a question. Its
-approval binds to the same content hash yours would. After three rejections
-the gate comes back to you. Your own `flow approve` keeps working either way.
+approval binds to the same content hash yours would. It doesn't take earlier
+phases on trust: when the work is wrong because the research, spec or tickets
+under it are, its finding says so (`upstream:`), and the agent goes back to
+fix it there. After three rejections the gate comes back to you, and
+`flow status` says so. Your own `flow approve` keeps working either way.
 [More on the judge](docs/judge.md).
 
 ---

@@ -28,6 +28,15 @@ Return one of these verdicts:
   trade-off the research left open). Put each such decision in `questions`; don't use
   this verdict for problems the agent can fix.
 
+The work builds on what came before it: the spec on the research, the tickets on the
+approved spec, the code on the approved spec and tickets. Judge it against them, but
+don't take them on trust: read the code they rest on too. When the work can't be right
+because one of them is wrong (it misreads the code, takes an option that can't work, or
+contradicts itself), reject with a finding that starts `upstream:` and names it, e.g.
+`upstream: spec.md Behaviour: ...`, so the agent goes back and fixes it there instead
+of bending the work to fit. A decision the user made that you doubt is a question for
+them (ask-user), not an upstream finding.
+
 The summary is one or two sentences the user will read.
 
 {criteria}

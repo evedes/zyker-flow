@@ -133,10 +133,20 @@ pub fn status(repo: &Repo) -> Result<i32> {
             println!("approval {kind}: {}{by}", if valid { "valid" } else { stale });
         }
     }
-    let delegated: Vec<&str> =
-        GATES.iter().filter(|g| st.delegated(**g).is_some()).map(|g| g.name()).collect();
+    let (back, delegated): (Vec<Phase>, Vec<Phase>) = GATES
+        .into_iter()
+        .filter(|g| st.delegated(*g).is_some())
+        .partition(|g| judge::handed_back(&st, *g));
     if !delegated.is_empty() {
-        println!("delegated to the judge: {}", delegated.join(", "));
+        println!("delegated to the judge: {}", judge::names(&delegated));
+    }
+    if !back.is_empty() {
+        let cmd = flow_cmd(&repo.root);
+        println!(
+            "handed back by the judge after {MAX_REJECTS} rejections: {}; the user approves \
+             (`! {cmd} approve <gate>`) or delegates again (`! {cmd} delegate <gate>`)",
+            judge::names(&back)
+        );
     }
     if let Some(j) = st.judgements().iter().rev().find(|j| j.gate == st.phase.name()) {
         println!("judge on {}: {} — {}", j.gate, j.verdict, j.summary);
@@ -366,7 +376,7 @@ pub fn judge(repo: &Repo) -> Result<i32> {
     if !GATES.contains(&gate) {
         bail!("the judge passes spec, tickets and review (now {gate})");
     }
-    let Some(since) = st.delegated(gate).map(|d| d.judgements) else {
+    if st.delegated(gate).is_none() {
         bail!(
             "the user has not delegated {gate} to the judge: they approve it \
              (`! {cmd} approve {gate}`), or delegate it (`! {cmd} delegate {gate}`)"
@@ -383,11 +393,9 @@ pub fn judge(repo: &Repo) -> Result<i32> {
         report(j);
         return Ok(if j.verdict == "approve" { 0 } else { 1 });
     }
-    let since_delegated = st.judgements().iter().skip(since).filter(mine);
-    let rejects = since_delegated.filter(|j| j.verdict == "reject").count();
-    if rejects >= MAX_REJECTS {
+    if judge::handed_back(&st, gate) {
         bail!(
-            "the judge rejected {gate} {rejects} times since it was delegated: the user \
+            "the judge rejected {gate} {MAX_REJECTS} times since it was delegated: the user \
              approves it (`! {cmd} approve {gate}`), or delegates it again for \
              {MAX_REJECTS} more tries (`! {cmd} delegate {gate}`)"
         );

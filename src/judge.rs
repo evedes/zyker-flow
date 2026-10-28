@@ -23,6 +23,27 @@ const TOOLS: &str = "Read,Grep,Glob";
 
 pub const VERDICTS: [&str; 3] = ["approve", "reject", "ask-user"];
 
+/// The judge's rejections of `gate` since the user last delegated it (none when it isn't).
+pub fn rejects(st: &State, gate: Phase) -> usize {
+    let Some(since) = st.delegated(gate).map(|d| d.judgements) else {
+        return 0;
+    };
+    let mine = |j: &&crate::config::Judgement| j.gate == gate.name() && j.verdict == "reject";
+    st.judgements().iter().skip(since).filter(mine).count()
+}
+
+/// Whether the judge handed `gate` back to the user: it rejected it MAX_REJECTS times
+/// since it was delegated, so `flow judge` refuses until the user approves it or
+/// delegates it again.
+pub fn handed_back(st: &State, gate: Phase) -> bool {
+    rejects(st, gate) >= MAX_REJECTS
+}
+
+/// Gates as a list for the user: `spec, review`.
+pub fn names(gates: &[Phase]) -> String {
+    gates.iter().map(|g| g.name()).collect::<Vec<_>>().join(", ")
+}
+
 #[derive(Deserialize)]
 pub struct Verdict {
     pub verdict: String,

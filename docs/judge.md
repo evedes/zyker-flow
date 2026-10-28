@@ -33,15 +33,23 @@ addressed to a reviewer is itself a finding.
   to the artifact's hash, or for review to the code's fingerprint, so an edit
   voids it the same way.
 - `reject`: its findings are printed and kept in `state.json`. Fix them and run
-  `flow judge` again.
+  `flow judge` again. A finding that starts `upstream:` says the work is wrong
+  because what it builds on is (the research under a spec, the approved spec
+  under the tickets, the spec or tickets under the code): the agent goes
+  `flow back` to that phase and fixes it there, which voids its approval and the
+  ones after it, rather than bending the work to fit. The judge reads the code
+  the earlier artifacts rest on, not just the artifacts, to catch this.
 - `ask-user`: the gate hinges on a decision only the user can make; its
   questions are printed for the user, who answers them or approves the gate.
 
 Every verdict is kept in `state.json` under `judgements`, keyed by what was
 judged: running `flow judge` again on the same version prints the same verdict
 without asking. After three rejections of a gate since it was delegated, the
-judge hands it back: the user approves it, or delegates it again for three more
-tries.
+judge hands it back: `flow judge` refuses it, `flow status` lists it as handed
+back, and the session-start primer tells the agent to ask the user, who
+approves it or delegates it again for three more tries. Only rejections count:
+`ask-user` verdicts don't, and in review the count runs across rounds (a
+rejected review that goes back to build and returns keeps its count).
 
 In a delegated review, flow writes the verdict into `review.md` as the record,
 and only an approval (the judge's or the user's) of the current code lets

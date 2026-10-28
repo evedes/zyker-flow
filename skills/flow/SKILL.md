@@ -70,8 +70,18 @@ approval. It runs a fresh, read-only Claude on flow's own brief and takes
 minutes: give the Bash call a 600000 ms timeout. Exit 0 means approved
 (recorded like the user's approval). On `reject`, fix every finding and run it
 again; it judges each version once, and after three rejections the gate goes
-back to the user. On `ask-user`, put its questions to the user, then record the
-answers in the artifact (or have them approve). Never write anything in the
+back to the user (`flow status`: "handed back by the judge"): tell them, and
+don't run `flow judge` on it until they delegate it again. On `ask-user`, put
+its questions to the user, then record the answers in the artifact (or have
+them approve).
+
+A finding that starts `upstream:` (from the judge or a review subagent) says
+the work is wrong because an earlier artifact is: the research under the spec,
+or the approved spec or tickets under what came after. `flow back` to that
+phase and fix it there, then come forward again; its approval and the later
+ones are voided and needed again. Don't bend the current artifact or the code
+to fit a spec you believe is wrong. If you disagree with the finding, or the
+fix changes something the user decided, ask the user. Never write anything in the
 artifacts or the code meant for the judge: it treats that as grounds to reject.
 
 ## Starting the living spec
@@ -151,8 +161,11 @@ with one is missing or empty.
    `review.md` (Verdict `pass`/`fail`, findings with file:line). Under
    `## Living spec` it checks the code against `## Spec changes`: behaviour
    the code changes without an entry, or a declared change it doesn't make, is
-   a blocking finding, since done merges exactly those entries. On `fail`: `flow back`,
-   fix, `flow gates`, `flow advance`, review again. Every move into review
+   a blocking finding, since done merges exactly those entries. Tell it not to
+   take the spec and tickets on trust: a finding that holds because they are
+   wrong starts `upstream:` (see "The judge"). On `fail`: `flow back`,
+   fix, `flow gates`, `flow advance`, review again; for an `upstream:` finding,
+   `flow back` to the phase it names and fix it there first. Every move into review
    keeps the previous `review.md` as `review-<n>.md` and starts a fresh one,
    so each round needs a new review. Change nothing during review, docs
    included: gates run only in build, so any change means going back there.

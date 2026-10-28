@@ -766,6 +766,8 @@ fn the_judge_passes_only_what_the_user_delegated() {
     assert_in("<artifact path=\"work/001-hello/spec.md\">\n# Spec: x", &prompt);
     assert_in("<artifact path=\"work/001-hello/research.md\">", &prompt);
     assert_in("Judge the spec (spec.md)", &prompt);
+    // Earlier phases aren't taken on trust: a finding against one is marked upstream.
+    assert_in("reject with a finding that starts `upstream:` and names it", &prompt);
     assert!(!prompt.contains("Judge the tickets"), "{prompt}");
     assert_eq!(t.state()["approvals"]["spec"]["by"], "judge");
     assert_in("approval spec: valid (by the judge)", &t.flow(&["status"]).stdout);
@@ -804,7 +806,18 @@ fn a_rejection_is_kept_per_version_and_hands_back_after_three() {
     t.fwrite("spec.md", SPEC.replace("Shows hello.", "Shows hello, or an error.").as_str());
     let r = t.flow_any(&["judge"]);
     assert_in("rejected spec 3 times since it was delegated", &r.stderr);
+    // Handed back: status and the primer say the user has it now, not the judge.
+    let cmd = flow_bin().display().to_string();
+    let status = t.flow(&["status"]).stdout;
+    assert_in("handed back by the judge after 3 rejections: spec;", &status);
+    assert!(!status.contains("delegated to the judge"), "{status}");
+    let ctx = session_context(&t);
+    assert_in("\nHanded back by the judge after 3 rejections: spec. ", &ctx);
+    assert_in(&format!("then ask the user for `! {cmd} approve spec` or `! {cmd} delegate spec` (the judge rejected it 3 times)"), &ctx);
+    assert!(!ctx.contains("Delegated to the judge"), "{ctx}");
     t.flow(&["delegate", "spec"]); // three more tries
+    assert_in("delegated to the judge: spec", &t.flow(&["status"]).stdout);
+    assert_in(&format!("Present it, then run `{cmd} judge`."), &session_context(&t));
     judge.says("approve", "Fine now.", &[]);
     t.flow(&["judge"]);
     assert_eq!(t.state()["judgements"].as_array().unwrap().len(), 4);
@@ -863,6 +876,37 @@ fn a_delegated_review_needs_the_judge_not_review_md() {
     judge.says("approve", "Tested now.", &[]);
     t.flow(&["judge"]);
     assert_in("## Verdict\npass — Tested now.", &t.fread("review.md"));
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "ship");
+}
+
+#[test]
+fn a_review_rejected_three_times_across_rounds_goes_back_to_the_user() {
+    let mut t = Flow::new();
+    let judge = Judge::new(&mut t);
+    t.to_build();
+    t.flow(&["delegate", "review"]);
+    judge.says("reject", "Still wrong.", &["lib/app.ex:1 wrong"]);
+    for n in 1..=3 {
+        t.write("lib/app.ex", format!("round {n}\n"));
+        t.flow(&["gates"]);
+        t.flow(&["advance"]);
+        assert_eq!(t.flow_any(&["judge"]).code, 1);
+        t.flow(&["back"]);
+    }
+    t.write("lib/app.ex", "round 4\n");
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    assert_in("rejected review 3 times", &t.flow_any(&["judge"]).stderr);
+    let cmd = flow_bin().display().to_string();
+    assert_in(
+        &format!(
+            "\nNow (review): the judge rejected review 3 times, so it is back with the user: \
+             ask them for `! {cmd} approve review` or `! {cmd} delegate review`."
+        ),
+        &session_context(&t),
+    );
+    t.flow(&["approve", "review"]);
     t.flow(&["advance"]);
     assert_eq!(t.phase(), "ship");
 }

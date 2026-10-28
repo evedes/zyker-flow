@@ -4,7 +4,7 @@
 
 use crate::config::{Phase, State};
 use crate::error::Result;
-use crate::judge::GATES;
+use crate::judge::{self, GATES, MAX_REJECTS};
 use crate::repo::Repo;
 use crate::specs;
 
@@ -64,13 +64,22 @@ pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> Result<String> {
         Some((fid, st)) => now(repo, &cmd, fid, st),
     });
     if let Some((_, st)) = active {
-        let delegated: Vec<&str> =
-            GATES.iter().filter(|g| st.delegated(**g).is_some()).map(|g| g.name()).collect();
+        let (back, delegated): (Vec<Phase>, Vec<Phase>) = GATES
+            .into_iter()
+            .filter(|g| st.delegated(*g).is_some())
+            .partition(|g| judge::handed_back(st, *g));
         if !delegated.is_empty() {
             out.push(format!(
                 "Delegated to the judge: {}. For those, run `{cmd} judge` (Bash timeout \
                  600000 ms) instead of asking the user for the approval.",
-                delegated.join(", ")
+                judge::names(&delegated)
+            ));
+        }
+        if !back.is_empty() {
+            out.push(format!(
+                "Handed back by the judge after {MAX_REJECTS} rejections: {}. `{cmd} judge` \
+                 refuses those now: tell the user, who approves them or delegates them again.",
+                judge::names(&back)
             ));
         }
     }
@@ -88,6 +97,10 @@ pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> Result<String> {
 fn now(repo: &Repo, cmd: &str, fid: &str, st: &State) -> String {
     let dir = format!("{}/{fid}", repo.work_rel);
     let ask = |gate: Phase| match st.delegated(gate) {
+        Some(_) if judge::handed_back(st, gate) => format!(
+            "ask the user for `! {cmd} approve {gate}` or `! {cmd} delegate {gate}` (the judge \
+             rejected it {MAX_REJECTS} times)"
+        ),
         Some(_) => format!("run `{cmd} judge`"),
         None => format!("ask the user for `! {cmd} approve {gate}`"),
     };
@@ -116,14 +129,21 @@ fn now(repo: &Repo, cmd: &str, fid: &str, st: &State) -> String {
              that makes them stale"
         ),
         Phase::Review => match st.delegated(Phase::Review) {
+            Some(_) if judge::handed_back(st, Phase::Review) => format!(
+                "the judge rejected review {MAX_REJECTS} times, so it is back with the user: \
+                 ask them for `! {cmd} approve review` or `! {cmd} delegate review`. Change \
+                 nothing now"
+            ),
             Some(_) => format!(
                 "run `{cmd} judge`: it reviews the code and writes {dir}/review.md. Change \
-                 nothing now; on a rejection, `{cmd} back` to build"
+                 nothing now; on a rejection, `{cmd} back` to build, or to the phase an \
+                 `upstream:` finding names"
             ),
             None => format!(
                 "have a fresh subagent that did not write the code review spec.md, the \
-                 tickets and `git diff` into {dir}/review.md. Change nothing now; on fail, \
-                 `{cmd} back` to build"
+                 tickets and `git diff` into {dir}/review.md, marking a finding that the spec \
+                 or tickets are wrong `upstream:`. Change nothing now; on fail, `{cmd} back` \
+                 to build, or to the phase an `upstream:` finding names"
             ),
         },
         Phase::Ship => match repo.config.deploy {
