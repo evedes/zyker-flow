@@ -7,6 +7,7 @@ use crate::paths::{file_name, flow_cmd, posix, read, read_text, resolve, under};
 use fancy_regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -29,13 +30,24 @@ fn hex16(digest: &[u8]) -> String {
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> Result<Output> {
-    let out = Command::new("git").args(args).current_dir(dir).output();
+    run_git_with(dir, &[], args)
+}
+
+fn run_git_with(dir: &Path, env: &[(&str, &OsStr)], args: &[&str]) -> Result<Output> {
+    let mut c = Command::new("git");
+    c.args(args).current_dir(dir).envs(env.iter().map(|(k, v)| (k, v)));
+    let out = c.output();
     out.map_err(|e| Error(format!("git {} in {}: {e}", args.join(" "), dir.display())))
 }
 
 /// Runs git in `dir` for its stdout, with line endings made `\n`.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = run_git(dir, args)?;
+    git_with(dir, &[], args)
+}
+
+/// [`git`] with these environment variables set (GIT_INDEX_FILE, say).
+pub fn git_with(dir: &Path, env: &[(&str, &OsStr)], args: &[&str]) -> Result<String> {
+    let out = run_git_with(dir, env, args)?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         bail!("git {} failed: {}", args.join(" "), stderr.trim());

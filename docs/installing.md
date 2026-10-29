@@ -63,7 +63,8 @@ repo's `.claude/settings.json`: `Bash(flow approve:*)` and the other user-only
 commands, plus `Edit(<work_dir>/flow.json)` and `Edit(<work_dir>/*/state.json)`
 (an `Edit` rule covers Write and NotebookEdit too; Claude Code ignores
 `Write(path)` rules). The hook enforces the same things without them; they are
-a second layer.
+a second layer. A repo opted in before a user-only command existed (`rewind`,
+say) lacks its rule until it is added by hand; the hook denies it meanwhile.
 
 Don't also wire the hooks in a repo's own `.claude/settings.json`: plugin and
 project hooks both run, so every check would run twice.

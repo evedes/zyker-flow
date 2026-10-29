@@ -514,6 +514,97 @@ fn gates_go_stale_when_the_tickets_change() {
 }
 
 #[test]
+fn rewind_discards_the_work_since_a_checkpoint_and_keeps_it() {
+    let t = Flow::new();
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    t.write("lib/extra.ex", "extra\n");
+    t.git(&["add", "lib/extra.ex"]); // staged work goes too
+    t.write("README.md", "notes\n"); // not protected: left alone
+    t.flow(&["gates"]);
+    assert_in("are the user's", &denied(t.bash("flow rewind tickets")));
+    assert_in(
+        "flow rewind [explore|spec|tickets|build|review]",
+        &t.flow_any(&["rewind", "ship"]).stderr,
+    );
+    assert_in(
+        "can be rewound to that phase or an earlier one",
+        &t.flow_any(&["rewind", "review"]).stderr,
+    );
+
+    let r = t.flow(&["rewind", "tickets"]);
+    assert_in("001-hello: rewound to tickets", &r.stdout);
+    assert_in("kept as refs/flow/001-hello/attempt-1", &r.stdout);
+    assert_eq!(t.phase(), "tickets");
+    assert!(!t.path("lib/app.ex").exists() && !t.path("lib/extra.ex").exists());
+    assert_eq!(t.read("README.md"), "notes\n");
+    assert_in("TODO(flow)", &t.fread("tickets/T01.md")); // the scaffold, as on entering
+    assert_eq!(t.fread("spec.md"), SPEC);
+    assert_eq!(t.git(&["status", "--porcelain", "--", "lib"]), ""); // nothing left staged
+    let st = t.state();
+    assert!(st["approvals"]["spec"].is_object(), "{st}");
+    assert!(st["approvals"]["tickets"].is_null(), "{st}");
+    assert!(st["gates"].is_null(), "{st}");
+    let last = st["history"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(
+        (last["phase"].as_str(), last["rewound"].as_str()),
+        (Some("tickets"), Some("attempt-1"))
+    );
+    // The discarded work is kept, and the spec approval still holds.
+    assert_eq!(t.git(&["show", "refs/flow/001-hello/attempt-1:lib/extra.ex"]), "extra\n");
+    assert_eq!(
+        t.git(&["show", "refs/flow/001-hello/attempt-1:work/001-hello/tickets/T01.md"]),
+        TICKET
+    );
+    t.fwrite("tickets/T01.md", TICKET);
+    t.flow(&["approve", "tickets"]);
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "build");
+
+    let list = t.flow(&["rewind"]).stdout;
+    for name in ["attempt-1", "build", "explore", "spec", "tickets"] {
+        assert_in(&format!("{name}  "), &list);
+    }
+    t.flow(&["rewind", "explore"]);
+    assert_eq!(t.phase(), "explore");
+    assert!(!t.fdir().join("spec.md").exists());
+    assert_in("TODO(flow)", &t.fread("research.md"));
+    assert!(t.state()["approvals"].as_object().unwrap().is_empty());
+    assert_eq!(t.git(&["show", "refs/flow/001-hello/attempt-2:work/001-hello/spec.md"]), SPEC);
+}
+
+#[test]
+fn rewind_refuses_what_it_cant_put_back() {
+    let t = Flow::new();
+    t.to_ship();
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "hello"]);
+    let r = t.flow_any(&["rewind", "build"]);
+    assert_in("code was committed since 001-hello entered build (lib/app.ex)", &r.stderr);
+    assert_eq!(t.phase(), "ship");
+    // A feature from before checkpoints has none to rewind to.
+    t.git(&["update-ref", "-d", "refs/flow/001-hello/spec"]);
+    assert_in("has no checkpoint for spec", &t.flow_any(&["rewind", "spec"]).stderr);
+}
+
+#[test]
+fn the_judge_gives_back_an_approval_a_rewind_dropped() {
+    let mut t = Flow::new();
+    let judge = Judge::new(&mut t);
+    at_spec(&t);
+    t.flow(&["delegate", "spec"]);
+    t.flow(&["judge"]);
+    judge.file("args");
+    t.flow(&["rewind", "spec"]);
+    assert!(t.state()["approvals"]["spec"].is_null());
+    t.fwrite("spec.md", SPEC); // the same spec again
+    assert_in("judged this version of spec already", &t.flow(&["judge"]).stdout);
+    assert_eq!(judge.file("args"), ""); // not asked again
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "tickets");
+}
+
+#[test]
 fn records_from_before_the_basis_are_taken_as_they_were() {
     let t = Flow::new();
     t.to_build();
@@ -1326,7 +1417,7 @@ fn assert_key_order(text: &str, keys: &[&str]) {
 }
 
 const DOC: &str = "flow — a phase-gated feature workflow for Claude Code.\n\n\
-commands: init, new, status, check, advance, back, approve, delegate, judge, gates, deploy, pause, resume, abandon\n";
+commands: init, new, status, check, advance, back, approve, delegate, judge, gates, deploy, pause, resume, rewind, abandon\n";
 
 #[test]
 fn help_and_usage_errors() {
@@ -1606,6 +1697,7 @@ fn init_writes_settings_and_config_json() {
         "Bash(flow delegate:*)",
         "Bash(flow pause:*)",
         "Bash(flow resume:*)",
+        "Bash(flow rewind:*)",
         "Bash(flow abandon:*)",
         "Edit(flow/flow.json)",
         "Edit(flow/*/state.json)",
@@ -1666,7 +1758,8 @@ fn init_writes_settings_and_config_json() {
         u.read(".claude/settings.json"),
         "{\n  \"permissions\": {\n    \"deny\": [\n      \"Bash(flow approve:*)\",\n      \
          \"Bash(flow delegate:*)\",\n      \"Bash(flow pause:*)\",\n      \
-         \"Bash(flow resume:*)\",\n      \"Bash(flow abandon:*)\",\n      \
+         \"Bash(flow resume:*)\",\n      \"Bash(flow rewind:*)\",\n      \
+         \"Bash(flow abandon:*)\",\n      \
          \"Edit(flow/flow.json)\",\n      \"Edit(flow/*/state.json)\"\n    ]\n  }\n}\n"
     );
 }
@@ -1917,7 +2010,8 @@ fn bash_edge_cases() {
     let state = "flow: state files are written only by the flow CLI";
     let commit = "flow: commit touches code (lib/x.ex) but 001-hello is in phase explore; \
                   code is committed only in ship";
-    let user = "flow: approve/delegate/pause/resume/abandon are the user's: they run them as `! ";
+    let user =
+        "flow: approve/delegate/pause/resume/rewind/abandon are the user's: they run them as `! ";
     let wrong: Vec<String> = cases
         .into_iter()
         .filter_map(|(c, want)| {
@@ -2079,7 +2173,7 @@ fn flow_self_names_the_cli_when_flow_is_not_on_path() {
     );
     assert_eq!(
         denied(t.bash("flow approve spec")),
-        "flow: approve/delegate/pause/resume/abandon are the user's: they run them as `! tools/flow ...`"
+        "flow: approve/delegate/pause/resume/rewind/abandon are the user's: they run them as `! tools/flow ...`"
     );
 
     // Outside it: the absolute path, symlinks resolved.

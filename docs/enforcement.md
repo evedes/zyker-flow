@@ -16,7 +16,7 @@ What flow enforces, and how its hooks do it.
 | While a feature is active, the rules it is judged by (`.flow.json`, `.claude/settings.json` and `.claude/settings.local.json`, which hold the hooks and deny rules, `<work_dir>/STANDING.md`, `<work_dir>/templates/`, `<work_dir>/specs/`) change only by hand | hook |
 | The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply; done commits it, and review checks the code against those changes | CLI |
 | A phase can't be left until its artifact is complete: the sections its template requires are filled, no `TODO(flow)` placeholders, open questions ticked, ticket verification commands present | CLI (`flow check`) |
-| The agent can't run `approve`, `delegate`, `pause`, `resume`, `abandon`, or edit the state files | hook + permission deny rules |
+| The agent can't run `approve`, `delegate`, `pause`, `resume`, `rewind`, `abandon`, or edit the state files | hook + permission deny rules |
 
 Changes that touch no protected path (docs, CI, tooling) are never blocked
 from being made. They do count towards the gates, though: the fingerprint

@@ -18,6 +18,7 @@ macro_rules! regex {
     };
 }
 
+mod checkpoint;
 mod checks;
 mod commands;
 mod config;
@@ -45,9 +46,9 @@ fn is_space(c: char) -> bool {
 
 const SUMMARY: &str = "flow — a phase-gated feature workflow for Claude Code.";
 
-const COMMANDS: [&str; 14] = [
+const COMMANDS: [&str; 15] = [
     "init", "new", "status", "check", "advance", "back", "approve", "delegate", "judge", "gates",
-    "deploy", "pause", "resume", "abandon",
+    "deploy", "pause", "resume", "rewind", "abandon",
 ];
 
 /// Runs `f` with a panic turned into an error: a hook must fail closed, not crash.
@@ -104,6 +105,7 @@ fn run(name: &str, args: &[String]) -> Result<i32> {
         "deploy" => commands::deploy(&repo),
         "pause" => commands::pause(&repo, true),
         "resume" => commands::pause(&repo, false),
+        "rewind" => checkpoint::rewind(&repo, args),
         "abandon" => commands::abandon(&repo),
         _ => unreachable!("only known commands are dispatched"),
     }

@@ -30,6 +30,7 @@ default; `<work>` below).
 | `flow judge` | you | in a gate the user delegated: have the judge approve or reject it |
 | `flow approve spec\|tickets\|review` | **user only** | sign off; stays valid until the file (for review, the code) changes |
 | `flow delegate <gates>` / `off` | **user only** | let the judge pass spec, tickets or review for this feature |
+| `flow rewind [<phase>]` | **user only** | discard the work since a phase began, back to its checkpoint (no phase: list them) |
 | `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
 
 Never run the user-only commands, and never edit `<work>/flow.json` or
@@ -83,6 +84,19 @@ ones are voided and needed again. Don't bend the current artifact or the code
 to fit a spec you believe is wrong. If you disagree with the finding, or the
 fix changes something the user decided, ask the user. Never write anything in the
 artifacts or the code meant for the judge: it treats that as grounds to reject.
+
+## Starting over
+
+`flow back` keeps the work; `flow rewind <phase>` (the user's) discards it: the
+feature's folder and the protected code go back to how they were on entering
+that phase, the approvals from then on are dropped, and the discarded attempt
+is kept as `refs/flow/<id>/attempt-<n>`. When the work went wrong early enough
+that fixing it costs more than redoing it (a spec built on the wrong approach,
+tickets cut the wrong way, code that wandered), say so and propose
+`! flow rewind <phase>`, naming the phase and what would be discarded. After a
+rewind, `flow status` shows where things are; start that phase afresh, taking
+from the attempt only what still holds (`git show
+refs/flow/<id>/attempt-<n>:<path>`).
 
 ## Starting the living spec
 

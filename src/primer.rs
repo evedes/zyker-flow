@@ -33,7 +33,7 @@ pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> Result<String> {
              {work}/specs/ change only by the user's hand."
         ),
         format!(
-            "- Authority: approve, delegate, pause, resume and abandon are the user's (`! {cmd} \
+            "- Authority: approve, delegate, pause, resume, rewind and abandon are the user's (`! {cmd} \
              approve spec`). Never run them, and never edit {work}/flow.json or \
              {work}/*/state.json."
         ),

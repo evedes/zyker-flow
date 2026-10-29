@@ -63,7 +63,7 @@ nothing.
 - **The rules stay fixed.** While a feature is active, the agent can't edit
   `.flow.json`, the Claude settings, the standing agreement, the templates or
   the living spec.
-- **You keep the keys.** Only you can approve, pause, resume or abandon, and
+- **You keep the keys.** Only you can approve, pause, resume, rewind or abandon, and
   the agent can't edit flow's state files. You can hand the spec, tickets or
   review approval to a read-only [judge](#-the-judge), and take it back at any
   time.
@@ -141,7 +141,10 @@ the phases, and stops when it needs you:
 
 A phase can't be left until its artifact is complete: every required section
 is filled in and no `TODO(flow)` placeholders are left. The agent can always
-`flow back` a phase, for example when review finds a problem.
+`flow back` a phase, for example when review finds a problem. When starting
+again beats fixing, you can `! flow rewind <phase>`: the feature's files and
+code go back to how they were on entering that phase, and the discarded attempt
+is kept in git ([more on rewinding](docs/rewind.md)).
 
 ---
 
@@ -179,6 +182,7 @@ fix it there. After three rejections the gate comes back to you, and
 | `flow approve spec\|tickets\|review`      | **you**    | approve the current artifact (for review, the code as it is now) |
 | `flow delegate <gates…>` · `off`          | **you**    | let the judge pass gates for this feature, or stop it         |
 | `flow pause` · `flow resume`              | **you**    | suspend or restore enforcement                                |
+| `flow rewind [<phase>]`                   | **you**    | discard the work since a phase began (no phase: list checkpoints) |
 | `flow abandon`                            | **you**    | drop the active feature                                       |
 
 Run yours with the `!` prefix in Claude Code (`! flow approve spec`) or from a
@@ -223,6 +227,7 @@ Every key, the deploy providers and template overrides:
 | [enforcement](docs/enforcement.md)         | exactly what the hooks check, and how                     |
 | [the judge](docs/judge.md)                 | delegating approvals                                      |
 | [the living spec](docs/living-spec.md)     | `specs/`, spec changes, adopting flow in an existing repo |
+| [rewinding](docs/rewind.md)                | checkpoints, and discarding work to start a phase again   |
 | [known limitations](docs/limitations.md)   | what flow doesn't catch yet                               |
 | [development](docs/development.md)         | source layout, tests, releasing                           |
 

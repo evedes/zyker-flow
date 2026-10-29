@@ -137,5 +137,9 @@ the spec changes into `<work_dir>/specs/`, and commits both (see
 - `flow approve` works only in the artifact's own phase, and only when the
   artifact is complete.
 - `flow pause` suspends enforcement; the state files stay protected.
+- `flow rewind <phase>` puts the feature's folder and the protected code back to
+  the checkpoint taken on entering that phase, keeping the discarded work as
+  `refs/flow/<id>/attempt-<n>`; it refuses once protected code was committed
+  since (see [Rewinding a feature](rewind.md)).
 - `flow abandon` leaves the feature's folder in place with phase `abandoned`;
   it also clears an active feature whose folder is gone.

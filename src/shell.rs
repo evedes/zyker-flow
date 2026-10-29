@@ -5,7 +5,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 /// The commands only the user may run.
-pub const USER_ONLY: [&str; 5] = ["approve", "delegate", "pause", "resume", "abandon"];
+pub const USER_ONLY: [&str; 6] = ["approve", "delegate", "pause", "resume", "rewind", "abandon"];
 
 /// `<<` or `<<-` and the heredoc's word, bare or quoted. A word is letters, numbers and
 /// `_`: a mark or `²` after it is not part of it, whatever the regex crate's own `\w`

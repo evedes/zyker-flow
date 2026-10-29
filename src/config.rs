@@ -292,6 +292,9 @@ pub struct Event {
     pub at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back: Option<bool>,
+    /// On a `flow rewind`: the attempt-<n> checkpoint that keeps the work it discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewound: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -299,7 +302,7 @@ pub struct Event {
 impl Event {
     pub fn now(phase: Phase) -> Event {
         let (at, extra) = (now(), Extra::new());
-        Event { phase, at, back: None, extra }
+        Event { phase, at, back: None, rewound: None, extra }
     }
 }
 

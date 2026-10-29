@@ -1,5 +1,6 @@
 //! The CLI commands. Each returns the exit code, or an error printed as `flow: ...`.
 
+use crate::checkpoint;
 use crate::checks::{check, stale_approvals};
 use crate::config::{
     default_work_dir, now, read_json, write_json, Approval, Delegation, Event, Extra, GateResult,
@@ -103,6 +104,7 @@ pub fn new(repo: &Repo, args: &[String]) -> Result<i32> {
     repo.save_state(&fid, &st)?;
     scaffold(repo, &fid, &st, "research.md", None)?;
     repo.set_active(Some(&fid))?;
+    checkpoint::on_entering(repo, &fid, Phase::Explore);
     println!("started {fid} in phase explore; fill in {}/{fid}/research.md", repo.work_rel);
     Ok(0)
 }
@@ -217,6 +219,7 @@ pub fn advance(repo: &Repo) -> Result<i32> {
     st.phase = next;
     st.history.push(Event::now(next));
     repo.save_state(&fid, &st)?;
+    checkpoint::on_entering(repo, &fid, next);
     println!("{fid}: now in phase {next}");
     Ok(0)
 }
@@ -420,7 +423,20 @@ pub fn judge(repo: &Repo) -> Result<i32> {
     {
         println!("the judge has judged this version of {gate} already");
         report(j);
-        return Ok(if j.verdict == "approve" { 0 } else { 1 });
+        let approved = j.verdict == "approve";
+        // An approval a rewind dropped comes back with the very version it was given on.
+        if approved && !repo.approval_valid(&fid, &st, gate)? {
+            let (at, by) = (j.at.clone(), Some("judge".to_string()));
+            let approval = Approval { hash: Some(hash), basis, at, by, ..Default::default() };
+            let record = (gate == Phase::Review).then(|| review_record(&st, j));
+            let mut st = st;
+            st.approvals.get_or_insert_with(Default::default).insert(gate.name().into(), approval);
+            if let Some(record) = record {
+                write(&repo.fdir(&fid).join("review.md"), record)?;
+            }
+            repo.save_state(&fid, &st)?;
+        }
+        return Ok(if approved { 0 } else { 1 });
     }
     if judge::handed_back(&st, gate) {
         bail!(
