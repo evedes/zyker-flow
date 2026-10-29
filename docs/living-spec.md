@@ -39,8 +39,9 @@ area file starts with `# <area>`), Removed taken out, and the touched files
 rewritten with blank lines between headings and bodies. Done then commits them
 itself, with the feature's `state.json` and `<work_dir>/flow.json` where the
 repo tracks it (`flow: <id> done`, only those paths, the repo's own commit
-hooks running); a commit that fails puts every file back, leaves the feature
-in ship and says why.
+hooks running). If any step fails, the commit or one before it (a spec file it
+can't write, say), done puts every file back, leaves the feature in ship and
+says why; a file it can't put back is named, to restore by hand.
 
 Review checks that the merge will be true: `review.md`'s `## Living spec`
 (and the judge's review brief) asks whether the code changes behaviour the

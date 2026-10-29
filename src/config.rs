@@ -226,6 +226,9 @@ pub struct Approval {
     /// "judge" when `flow judge` gave it; the user's have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// The hash of what it rests on (`Repo::basis`); none in records older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -236,6 +239,9 @@ pub struct Gates {
     pub fingerprint: String,
     pub at: String,
     pub results: Vec<GateResult>,
+    /// The hash of what it rests on (`Repo::basis`); none in records older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -272,6 +278,9 @@ pub struct Judgement {
     #[serde(default)]
     pub questions: Vec<String>,
     pub at: String,
+    /// The hash of what it rests on (`Repo::basis`); none in records older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }

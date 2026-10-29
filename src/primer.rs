@@ -20,7 +20,9 @@ pub fn primer(repo: &Repo, active: Option<(&str, &State)>) -> Result<String> {
             .into(),
         "What flow keeps aligned:".into(),
         "- Intent: code follows a spec and tickets the user approved. Each approval is bound \
-         to the artifact's content hash, so editing an approved spec.md or ticket voids it."
+         to the artifact's content hash, so editing an approved spec.md or ticket voids it, \
+         and to what it rests on: a new spec voids the tickets' approval, and new tickets \
+         the gates' pass."
             .into(),
         "- Code: what is committed is exactly the code that passed the gates and review (a \
          fingerprint of every file git sees), so any change after them needs them again."

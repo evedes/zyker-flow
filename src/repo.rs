@@ -349,16 +349,56 @@ impl Repo {
         }
     }
 
+    /// What an approval of `kind`, or the gates (`Phase::Build`), rests on: the spec for
+    /// the tickets; the spec and the tickets for the gates and the review. None for the
+    /// spec, which rests on nothing flow approves.
+    pub fn basis(&self, fid: &str, kind: Phase) -> Result<Option<String>> {
+        let spec = self.artifact_hash(fid, Phase::Spec)?;
+        match kind {
+            Phase::Tickets => Ok(spec),
+            Phase::Build | Phase::Review => {
+                let tickets = self.artifact_hash(fid, Phase::Tickets)?;
+                let mut h = Sha256::new();
+                h.update(spec.unwrap_or_default());
+                h.update(b"\0");
+                h.update(tickets.unwrap_or_default());
+                Ok(Some(hex16(&h.finalize())))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether a record made on `basis` still rests on what it did. One without a basis
+    /// predates them, and is taken as it was.
+    fn rests(&self, fid: &str, kind: Phase, basis: &Option<String>) -> Result<bool> {
+        Ok(basis.is_none() || *basis == self.basis(fid, kind)?)
+    }
+
     pub fn approval_valid(&self, fid: &str, st: &State, kind: Phase) -> Result<bool> {
         match st.approval(kind) {
-            Some(a) => Ok(a.hash == self.gate_hash(fid, kind)?),
+            Some(a) => Ok(a.hash == self.gate_hash(fid, kind)? && self.rests(fid, kind, &a.basis)?),
             None => Ok(false),
         }
     }
 
-    pub fn gates_current(&self, st: &State) -> Result<bool> {
+    /// Whether `kind`'s approval still matches its own artifact but no longer what it
+    /// rests on (the tickets, approved on another spec).
+    pub fn approval_outdated(&self, fid: &str, st: &State, kind: Phase) -> Result<bool> {
+        match st.approval(kind) {
+            Some(a) => {
+                Ok(a.hash == self.gate_hash(fid, kind)? && !self.rests(fid, kind, &a.basis)?)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Whether the gates passed on the code as it is now, and on the spec and tickets.
+    pub fn gates_current(&self, fid: &str, st: &State) -> Result<bool> {
         match st.gates() {
-            Some(g) if g.passed => Ok(g.fingerprint == self.fingerprint()?),
+            Some(g) if g.passed => {
+                Ok(g.fingerprint == self.fingerprint()?
+                    && self.rests(fid, Phase::Build, &g.basis)?)
+            }
             _ => Ok(false),
         }
     }

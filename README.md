@@ -57,7 +57,9 @@ nothing.
   tickets are approved and both the gates and the review have passed, all on
   the exact code being committed (a content fingerprint).
 - **Approvals stick to what was approved.** An approval is bound to the
-  artifact's content, so editing an approved spec or ticket voids it.
+  artifact's content, so editing an approved spec or ticket voids it. What
+  rests on it goes too: tickets approved on an earlier spec need approving
+  again, and gates passed on earlier tickets need rerunning.
 - **The rules stay fixed.** While a feature is active, the agent can't edit
   `.flow.json`, the Claude settings, the standing agreement, the templates or
   the living spec.

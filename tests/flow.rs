@@ -467,7 +467,68 @@ fn gates_run_only_in_build() {
     t.fwrite("review.md", REVIEW);
     t.write("README.md", "changed after the review\n");
     assert_in("gates run in build", &t.flow_any(&["gates"]).stderr);
-    assert_in("code changed since the gates passed", &t.flow_any(&["advance"]).stderr);
+    assert_in("code or tickets changed since the gates passed", &t.flow_any(&["advance"]).stderr);
+}
+
+#[test]
+fn tickets_approved_on_another_spec_need_approving_again() {
+    let t = Flow::new();
+    t.to_build();
+    t.flow(&["back"]);
+    t.flow(&["back"]);
+    t.fwrite("spec.md", &format!("{SPEC}\nan error state too\n"));
+    t.flow(&["approve", "spec"]);
+    t.flow(&["advance"]);
+    // The tickets are unchanged, but were approved on the old spec.
+    assert_in("tickets need the user's approval", &t.flow_any(&["check"]).stdout);
+    assert_in("approval tickets: STALE (spec changed since approval)", &t.flow(&["status"]).stdout);
+    t.flow(&["approve", "tickets"]);
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "build");
+    t.write("lib/app.ex", "hello\n");
+    // Further on, a spec changed under approved tickets is named as such.
+    t.fwrite("spec.md", &format!("{SPEC}\nand a third\n"));
+    let r = t.flow_any(&["gates"]);
+    assert_in("spec changed since it was approved", &r.stderr);
+    t.fwrite("spec.md", &format!("{SPEC}\nan error state too\n"));
+    t.flow(&["gates"]);
+}
+
+#[test]
+fn gates_go_stale_when_the_tickets_change() {
+    let t = Flow::new();
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    t.flow(&["gates"]);
+    t.flow(&["back"]);
+    t.fwrite("tickets/T02.md", TICKET); // a new ticket, with its own checks
+    t.flow(&["approve", "tickets"]);
+    t.flow(&["advance"]);
+    // Same code, but the new ticket's verification steps never ran.
+    let check = t.flow_any(&["check"]).stdout;
+    assert_in("gates have not passed on the current code and tickets", &check);
+    assert_in("gates: passed (stale: code or tickets changed since)", &t.flow(&["status"]).stdout);
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "review");
+}
+
+#[test]
+fn records_from_before_the_basis_are_taken_as_they_were() {
+    let t = Flow::new();
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    t.flow(&["gates"]);
+    let mut st = t.state();
+    assert!(st["approvals"]["tickets"]["basis"].is_string(), "{st}");
+    assert!(st["gates"]["basis"].is_string(), "{st}");
+    assert!(st["approvals"]["spec"].get("basis").is_none(), "{st}");
+    st["approvals"]["tickets"].as_object_mut().unwrap().remove("basis");
+    st["gates"].as_object_mut().unwrap().remove("basis");
+    t.fwrite("state.json", &st.to_string());
+    t.flow(&["check"]);
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "review");
 }
 
 #[test]
@@ -614,6 +675,35 @@ fn done_puts_everything_back_when_its_commit_fails() {
     assert_eq!(t.phase(), "done");
     assert_eq!(t.git(&["status", "--porcelain"]), "");
     assert_in("Says hello.", &t.read("work/specs/greeting.md"));
+}
+
+#[test]
+fn done_puts_everything_back_when_an_earlier_step_fails() {
+    let t = Flow::new();
+    t.write("work/specs/greeting.md", "# greeting\n\n## Hello\n\nSays hi.\n");
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "living spec"]);
+    let changes = "### Changed greeting: Hello\nSays hello.\n\n\
+                   ### Added farewell: Goodbye\nSays goodbye.\n";
+    t.to_ship_with(&spec_changing(changes));
+    t.git(&["add", "-A"]);
+    t.git(&["commit", "-qm", "hello"]);
+    // farewell.md is written first; greeting.md, second, can't be.
+    let greeting = t.path("work/specs/greeting.md");
+    fs::set_permissions(&greeting, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let r = t.flow_any(&["advance"]);
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_in("nothing changed: 001-hello is still in ship", &r.stderr);
+    assert!(!t.path("work/specs/farewell.md").exists());
+    assert_eq!(t.phase(), "ship");
+    assert_eq!(parse(&t.read("work/flow.json"))["active"], "001-hello");
+    assert_eq!(t.git(&["status", "--porcelain"]), "");
+
+    fs::set_permissions(&greeting, fs::Permissions::from_mode(0o644)).unwrap();
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "done");
+    assert_in("Says goodbye.", &t.read("work/specs/farewell.md"));
 }
 
 #[test]
@@ -821,6 +911,28 @@ fn a_rejection_is_kept_per_version_and_hands_back_after_three() {
     judge.says("approve", "Fine now.", &[]);
     t.flow(&["judge"]);
     assert_eq!(t.state()["judgements"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn the_judge_judges_the_same_tickets_again_on_a_new_spec() {
+    let mut t = Flow::new();
+    let judge = Judge::new(&mut t);
+    at_spec(&t);
+    t.flow(&["approve", "spec"]);
+    t.flow(&["advance"]);
+    t.fwrite("tickets/T01.md", TICKET);
+    t.flow(&["delegate", "tickets"]);
+    t.flow(&["judge"]);
+    judge.file("args");
+    t.flow(&["back"]);
+    t.fwrite("spec.md", &format!("{SPEC}\nan error state too\n"));
+    t.flow(&["approve", "spec"]);
+    t.flow(&["advance"]);
+    let r = t.flow(&["judge"]);
+    assert!(!r.stdout.contains("judged this version"), "{}", r.stdout);
+    assert_in("-p --output-format json", &judge.file("args")); // it ran
+    t.flow(&["advance"]);
+    assert_eq!(t.phase(), "build");
 }
 
 #[test]

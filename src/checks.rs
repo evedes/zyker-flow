@@ -14,12 +14,21 @@ use std::sync::LazyLock;
 /// `\w` is a letter, a number or `_`: a combining mark after "pass" ends the word.
 static VERDICT_PASS: LazyLock<Regex> = regex!(r"(?i)^[^\p{L}\p{N}_]*pass(?:[^\p{L}\p{N}_]|$)");
 
-/// Approvals given in an earlier phase whose artifact has changed since.
+/// Approvals given in an earlier phase whose artifact, or what it rests on, has changed
+/// since.
 pub fn stale_approvals(repo: &Repo, fid: &str, st: &State) -> Result<Vec<String>> {
     let at = Phase::ALL.iter().position(|&p| p == st.phase).unwrap_or(0);
     let mut stale = Vec::new();
     for (i, kind) in Phase::ALL.iter().enumerate().filter(|(_, k)| Phase::APPROVABLE.contains(k)) {
-        if i < at && !repo.approval_valid(fid, st, *kind)? {
+        if i >= at || repo.approval_valid(fid, st, *kind)? {
+            continue;
+        }
+        if repo.approval_outdated(fid, st, *kind)? {
+            stale.push(format!(
+                "{kind} were approved on another spec.md: `flow back` to {kind}, check them \
+                 against the spec, and ask for a new approval"
+            ));
+        } else {
             stale.push(format!(
                 "{kind} changed since it was approved: restore it, or `flow back` to {kind} \
                  and ask for a new approval"
@@ -80,8 +89,9 @@ pub fn check(repo: &Repo, fid: &str, st: &State, own_approval: bool) -> Result<V
             }
         }
         Phase::Build => {
-            if !repo.gates_current(st)? {
-                problems.push("gates have not passed on the current code: run `flow gates`".into());
+            if !repo.gates_current(fid, st)? {
+                let why = "gates have not passed on the current code and tickets: run `flow gates`";
+                problems.push(why.into());
             }
         }
         Phase::Review => {
@@ -99,8 +109,9 @@ pub fn check(repo: &Repo, fid: &str, st: &State, own_approval: bool) -> Result<V
                     problems.push("review.md: '## Verdict' does not start with 'pass'".into());
                 }
             }
-            if !repo.gates_current(st)? {
-                let why = "code changed since the gates passed: `flow back`, fix, `flow gates`";
+            if !repo.gates_current(fid, st)? {
+                let why = "code or tickets changed since the gates passed: `flow back`, fix, \
+                           `flow gates`";
                 problems.push(why.into());
             }
         }

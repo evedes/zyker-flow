@@ -146,7 +146,10 @@ with one is missing or empty.
    commands that prove the ticket (one per line, in a ``` block). Ask for
    `! flow approve tickets` (delegated: run `flow judge`). Leave `spec.md` and
    the tickets alone once approved: `flow gates` and every later phase refuse
-   until they are restored or approved again (`flow back` to that phase).
+   until they are restored or approved again (`flow back` to that phase). A
+   spec approved again voids the tickets' approval even if they are unchanged:
+   check them against the new spec and ask for it again. Tickets changed after
+   the gates passed make them stale, so rerun `flow gates` in build.
 4. **build** — per ticket, write the failing test from its acceptance criteria
    first, then the code, then check it in the running app (how to run it is in
    the repo's `AGENTS.md`; if it isn't, ask the user and propose adding it). When all tickets
@@ -176,8 +179,8 @@ with one is missing or empty.
    CI is green for HEAD and the health check returns 200. Without one, ship
    ends once everything is committed. Moving to done rewrites `state.json`,
    merges the spec changes into `<work>/specs/` and commits both itself
-   (`flow: <id> done`); if that commit fails (a pre-commit hook, say) nothing
-   changes and the feature stays in ship: fix the cause and advance again. When CI fails, find the cause with the CI's own
+   (`flow: <id> done`); if any of that fails (a pre-commit hook, a spec file
+   it can't write) nothing changes and the feature stays in ship: fix the cause and advance again. When CI fails, find the cause with the CI's own
    tooling (its job logs, or the failing step run locally), then `flow back`
    to build to fix it; a fix the approved tickets don't cover goes back to
    tickets (or spec) for a new one first.

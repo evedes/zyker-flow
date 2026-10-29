@@ -9,8 +9,9 @@ What flow enforces, and how its hooks do it.
 | Code under `protected_paths` is edited only in **build** (Edit/Write tools, Bash writes, `codegen` commands) | hook |
 | Code is committed only in **ship**, with both approvals valid, gates passed and review passed **on the exact code being committed** (content fingerprint) | hook on `git commit` |
 | Every move into review starts a fresh `review.md`, and gates run only in build, so a verdict only covers the code it was written for | CLI |
+| The gates' pass covers the spec and tickets they ran on as well as the code: a ticket added or changed since (its verification steps never ran) makes them stale | CLI |
 | No `git push` while a CI/deploy run is in flight | hook on `git push` (the `deploy` provider) |
-| Spec and tickets need the user's approval, or the judge's where the user delegated it; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again | CLI |
+| Spec and tickets need the user's approval, or the judge's where the user delegated it; editing them afterwards voids it (content hash), and `flow gates` and every later phase refuse until they are restored or approved again. Each approval also records what it rests on: the tickets' approval the spec it was given on, the review's the spec and tickets, so changing the spec voids the tickets' approval too | CLI |
 | A delegated review needs the judge's approval (or the user's) of the exact code; a verdict the agent writes in `review.md` doesn't count | CLI |
 | While a feature is active, the rules it is judged by (`.flow.json`, `.claude/settings.json` and `.claude/settings.local.json`, which hold the hooks and deny rules, `<work_dir>/STANDING.md`, `<work_dir>/templates/`, `<work_dir>/specs/`) change only by hand | hook |
 | The living spec (`<work_dir>/specs/`) changes only at done, by the spec changes the user approved, and only when they still apply; done commits it, and review checks the code against those changes | CLI |

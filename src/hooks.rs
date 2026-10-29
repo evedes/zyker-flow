@@ -267,13 +267,9 @@ fn commit_problem(repo: &Repo, index_only: bool) -> Result<Option<String>> {
         }
     }
     let gates = "code changed since the gates passed: `flow back` to build and rerun `flow gates`";
-    let Some(passed) = st.gates().filter(|g| g.passed) else {
-        return Ok(Some(gates.into()));
-    };
-    let fingerprint = repo.fingerprint()?;
-    let why = if passed.fingerprint != fingerprint {
+    let why = if !repo.gates_current(&fid, &st)? {
         gates
-    } else if st.reviewed_fingerprint.flatten() != Some(fingerprint) {
+    } else if st.reviewed_fingerprint.flatten() != Some(repo.fingerprint()?) {
         "code changed since review passed: go back and review again"
     } else {
         return Ok(None);

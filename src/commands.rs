@@ -127,10 +127,15 @@ pub fn status(repo: &Repo) -> Result<i32> {
     println!("phase: {}", Phase::ALL.map(phase).join(" > "));
     for kind in GATES {
         if let Some(a) = st.approval(kind) {
-            let stale = "STALE (artifact changed since approval)";
-            let valid = repo.approval_valid(&fid, &st, kind)?;
+            let state = if repo.approval_valid(&fid, &st, kind)? {
+                "valid"
+            } else if repo.approval_outdated(&fid, &st, kind)? {
+                "STALE (spec changed since approval)"
+            } else {
+                "STALE (artifact changed since approval)"
+            };
             let by = if a.by.is_some() { " (by the judge)" } else { "" };
-            println!("approval {kind}: {}{by}", if valid { "valid" } else { stale });
+            println!("approval {kind}: {state}{by}");
         }
     }
     let (back, delegated): (Vec<Phase>, Vec<Phase>) = GATES
@@ -153,8 +158,8 @@ pub fn status(repo: &Repo) -> Result<i32> {
     }
     if let Some(gates) = st.gates() {
         let result = if gates.passed { "passed" } else { "FAILED" };
-        let stale = gates.passed && !repo.gates_current(&st)?;
-        let note = if stale { " (stale: code changed since)" } else { "" };
+        let stale = gates.passed && !repo.gates_current(&fid, &st)?;
+        let note = if stale { " (stale: code or tickets changed since)" } else { "" };
         println!("gates: {result}{note}");
     }
     let problems = check(repo, &fid, &st, true)?;
@@ -242,23 +247,44 @@ fn finish(repo: &Repo, fid: &str, mut st: State) -> Result<i32> {
         git(&repo.root, &args)
     };
 
-    let written = specs::apply(repo, merge)?;
-    st.phase = Phase::Done;
-    st.history.push(Event::now(Phase::Done));
-    repo.save_state(fid, &st)?;
-    repo.set_active(None)?;
-    let message = format!("flow: {fid} done");
-    if let Err(e) = on(&["add", "--"]).and_then(|_| on(&["commit", "-q", "-m", &message, "--"])) {
-        for (path, old) in before {
-            match old {
-                Some(bytes) => write(&path, bytes)?,
-                None => fs::remove_file(&path).map_err(|e| io_error(&path, e))?,
+    // Every step, not just the commit, is undone if a later one fails.
+    let steps = || -> Result<Vec<String>> {
+        let written = specs::apply(repo, merge)?;
+        st.phase = Phase::Done;
+        st.history.push(Event::now(Phase::Done));
+        repo.save_state(fid, &st)?;
+        repo.set_active(None)?;
+        let message = format!("flow: {fid} done");
+        on(&["add", "--"])?;
+        on(&["commit", "-q", "-m", &message, "--"])?;
+        Ok(written)
+    };
+    let written = match steps() {
+        Ok(written) => written,
+        Err(e) => {
+            let mut stuck = Vec::new();
+            for (path, old) in before {
+                let put_back = match old {
+                    Some(bytes) if fs::read(&path).ok().as_ref() == Some(&bytes) => Ok(()),
+                    Some(bytes) => write(&path, bytes),
+                    None if !path.exists() => Ok(()),
+                    None => fs::remove_file(&path).map_err(|e| io_error(&path, e)),
+                };
+                stuck.extend(put_back.err().map(|e| e.to_string()));
             }
+            let _ = on(&["reset", "-q", "--"]);
+            let cmd = flow_cmd(&repo.root);
+            if !stuck.is_empty() {
+                bail!(
+                    "{e}\nand these could not be put back; restore them by hand:\n{}",
+                    bullets(&stuck)
+                );
+            }
+            bail!(
+                "{e}\nnothing changed: {fid} is still in ship; fix that and `{cmd} advance` again"
+            );
         }
-        let _ = on(&["reset", "-q", "--"]);
-        let cmd = flow_cmd(&repo.root);
-        bail!("{e}\nnothing changed: {fid} is still in ship; fix that and `{cmd} advance` again");
-    }
+    };
     if !written.is_empty() {
         println!("merged the spec changes into {}", written.join(", "));
     }
@@ -295,8 +321,8 @@ pub fn approve(repo: &Repo, args: &[String]) -> Result<i32> {
     if !problems.is_empty() {
         bail!("{kind} is not complete:\n{}", bullets(&problems));
     }
-    let hash = repo.gate_hash(&fid, kind)?;
-    let approval = Approval { hash, at: now(), ..Default::default() };
+    let (hash, basis) = (repo.gate_hash(&fid, kind)?, repo.basis(&fid, kind)?);
+    let approval = Approval { hash, basis, at: now(), ..Default::default() };
     let approvals = st.approvals.get_or_insert_with(Default::default);
     approvals.insert(kind.name().into(), approval);
     repo.save_state(&fid, &st)?;
@@ -387,8 +413,11 @@ pub fn judge(repo: &Repo) -> Result<i32> {
         bail!("{gate} is not ready to judge:\n{}", bullets(&problems));
     }
     let hash = repo.gate_hash(&fid, gate)?.unwrap_or_default();
+    let basis = repo.basis(&fid, gate)?;
     let mine = |j: &&Judgement| j.gate == gate.name();
-    if let Some(j) = st.judgements().iter().filter(mine).find(|j| j.hash == hash) {
+    if let Some(j) =
+        st.judgements().iter().filter(mine).find(|j| j.hash == hash && j.basis == basis)
+    {
         println!("the judge has judged this version of {gate} already");
         report(j);
         return Ok(if j.verdict == "approve" { 0 } else { 1 });
@@ -403,7 +432,7 @@ pub fn judge(repo: &Repo) -> Result<i32> {
     println!("judging {gate} of {fid} with a read-only `claude -p`; this takes minutes");
     let Verdict { verdict, summary, findings, questions } =
         judge::ask(repo, &judge::prompt(repo, &fid, &st, gate)?)?;
-    if repo.gate_hash(&fid, gate)?.unwrap_or_default() != hash {
+    if repo.gate_hash(&fid, gate)?.unwrap_or_default() != hash || repo.basis(&fid, gate)? != basis {
         bail!("{gate} changed while the judge read it; nothing recorded: `{cmd} judge` again");
     }
     // The state is read again: the user may have acted meanwhile.
@@ -412,6 +441,7 @@ pub fn judge(repo: &Repo) -> Result<i32> {
     let j = Judgement {
         gate: gate.name().into(),
         hash: hash.clone(),
+        basis: basis.clone(),
         verdict,
         summary,
         findings,
@@ -425,7 +455,7 @@ pub fn judge(repo: &Repo) -> Result<i32> {
     let approved = j.verdict == "approve";
     if approved {
         let by = Some("judge".to_string());
-        let approval = Approval { hash: Some(hash), at, by, ..Default::default() };
+        let approval = Approval { hash: Some(hash), basis, at, by, ..Default::default() };
         st.approvals.get_or_insert_with(Default::default).insert(gate.name().into(), approval);
     }
     report(&j);
@@ -463,8 +493,9 @@ pub fn gates(repo: &Repo) -> Result<i32> {
     }
     let passed = results.iter().all(|r| r.exit == 0);
     let count = results.len();
-    let (fingerprint, at) = (repo.fingerprint()?, now());
-    st.gates = Some(Some(Gates { passed, fingerprint, at, results, ..Default::default() }));
+    let (fingerprint, basis, at) = (repo.fingerprint()?, repo.basis(&fid, Phase::Build)?, now());
+    let gates = Gates { passed, fingerprint, basis, at, results, ..Default::default() };
+    st.gates = Some(Some(gates));
     repo.save_state(&fid, &st)?;
     println!("\ngates {} ({count} command(s))", if passed { "passed" } else { "FAILED" });
     Ok(if passed { 0 } else { 1 })
