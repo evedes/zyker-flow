@@ -1,6 +1,6 @@
 [package]
 name = "flow"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 # ureq 3 needs 1.85; Cargo.lock is format 4 (cargo 1.78+).
 rust-version = "1.85"
