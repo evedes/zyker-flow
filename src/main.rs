@@ -46,9 +46,9 @@ fn is_space(c: char) -> bool {
 
 const SUMMARY: &str = "flow — a phase-gated feature workflow for Claude Code.";
 
-const COMMANDS: [&str; 15] = [
+const COMMANDS: [&str; 16] = [
     "init", "new", "status", "check", "advance", "back", "approve", "delegate", "judge", "gates",
-    "deploy", "pause", "resume", "rewind", "abandon",
+    "deploy", "pause", "resume", "rewind", "reset", "abandon",
 ];
 
 /// Runs `f` with a panic turned into an error: a hook must fail closed, not crash.
@@ -106,6 +106,7 @@ fn run(name: &str, args: &[String]) -> Result<i32> {
         "pause" => commands::pause(&repo, true),
         "resume" => commands::pause(&repo, false),
         "rewind" => checkpoint::rewind(&repo, args),
+        "reset" => checkpoint::reset(&repo),
         "abandon" => commands::abandon(&repo),
         _ => unreachable!("only known commands are dispatched"),
     }

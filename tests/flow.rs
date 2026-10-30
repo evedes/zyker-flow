@@ -574,6 +574,36 @@ fn rewind_discards_the_work_since_a_checkpoint_and_keeps_it() {
 }
 
 #[test]
+fn rewind_runs_the_reset_commands_on_the_code_it_put_back() {
+    let t = Flow::new();
+    assert_in("no reset commands in .flow.json", &t.flow(&["reset"]).stdout);
+    // The reset sees the code as the checkpoint had it: no lib/app.ex yet.
+    let probe =
+        "if [ -e lib/app.ex ]; then echo code >> reset.log; else echo none >> reset.log; fi";
+    t.configure(json!({"reset": [probe, "test ! -e fail"]}));
+    t.to_build();
+    t.write("lib/app.ex", "hello\n");
+    let r = t.flow(&["rewind", "tickets"]);
+    assert_in("== [reset] if [ -e lib/app.ex ]", &r.stdout);
+    assert_eq!(t.read("reset.log"), "none\n");
+
+    // A reset that fails leaves the rewind done, and says how to retry.
+    t.fwrite("tickets/T01.md", TICKET);
+    t.flow(&["approve", "tickets"]);
+    t.flow(&["advance"]);
+    t.write("fail", "");
+    let r = t.flow_any(&["rewind", "build"]);
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_in("== FAILED (exit 1)", &r.stdout);
+    assert_in("rewound, but a reset failed", &r.stderr);
+    assert_eq!(t.phase(), "build");
+    assert_eq!(t.flow_any(&["reset"]).code, 1);
+    fs::remove_file(t.path("fail")).unwrap();
+    t.flow(&["reset"]);
+    assert_eq!(t.read("reset.log"), "none\nnone\nnone\nnone\n"); // the failed retry ran it too
+}
+
+#[test]
 fn rewind_refuses_what_it_cant_put_back() {
     let t = Flow::new();
     t.to_ship();
@@ -1417,7 +1447,7 @@ fn assert_key_order(text: &str, keys: &[&str]) {
 }
 
 const DOC: &str = "flow — a phase-gated feature workflow for Claude Code.\n\n\
-commands: init, new, status, check, advance, back, approve, delegate, judge, gates, deploy, pause, resume, rewind, abandon\n";
+commands: init, new, status, check, advance, back, approve, delegate, judge, gates, deploy, pause, resume, rewind, reset, abandon\n";
 
 #[test]
 fn help_and_usage_errors() {

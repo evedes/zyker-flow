@@ -25,6 +25,7 @@
 | `protected_paths` | path prefixes that count as code, relative to the git root (`./lib/` is `lib`); an absolute one, one with `..` or a glob, and one naming the whole repo are errors |
 | `standing_gates` | shell commands `flow gates` runs at the git root, before every ticket's verification commands |
 | `codegen` | regexes ([fancy-regex](https://docs.rs/fancy-regex) syntax) for commands that write code without naming the files (generators, formatters); each is searched for in one simple command at a time |
+| `reset` | optional: shell commands that put the disposable environment (a dev database, a local bucket) back to match the code, run at the git root by `flow reset` and after `flow rewind` (see [Rewinding a feature](rewind.md#reset-commands)) |
 | `deploy` | optional; without it the push check and the ship→done CI check are skipped (see [Deploy providers](#deploy-providers)) |
 | `judge` | optional: `model` and `max_budget_usd` for `flow judge` (see [The judge](judge.md)) |
 

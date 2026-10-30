@@ -23,6 +23,10 @@ pub struct Config {
     /// Commands that write code without naming the files (generators, formatters).
     #[serde(default)]
     pub codegen: Vec<String>,
+    /// Commands that put the disposable environment (a dev database, say) back to match
+    /// the code, run by `flow reset` and after `flow rewind`.
+    #[serde(default)]
+    pub reset: Vec<String>,
     #[serde(default, deserialize_with = "deploy_section")]
     pub deploy: Option<Deploy>,
     #[serde(default)]

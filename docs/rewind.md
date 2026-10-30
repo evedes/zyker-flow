@@ -52,3 +52,25 @@ rewound to.
 
 Rewinding to explore is starting over: research, spec, tickets and code all go
 back to the feature's first moment, with the attempt kept.
+
+## Reset commands
+
+Putting files back doesn't touch what the discarded work did outside them: a
+dev database it migrated, test data it created. `.flow.json`'s `reset` lists
+shell commands that put that environment back to match the code:
+
+```json
+"reset": ["bin/dev run --rm -T app mix ecto.reset"]
+```
+
+`flow rewind` runs them after it has put the files back, so they rebuild from
+the code as the checkpoint had it. They run at the git root with `/bin/sh`, in
+order, stdin closed, and stop at the first that fails; the rewind stays done,
+exits 1, and says so. `flow reset` runs them again on their own (the agent may
+too: they only touch the disposable environment). `flow abandon` doesn't run
+them, since it leaves the code in place.
+
+Keep them to what is disposable and local. A reset can name another repo's
+environment when the two share state: when an app's dev database also runs a
+library repo's migrations, the library's rewind may want
+`(cd ../app && bin/dev run --rm -T app mix ecto.reset)` as well.

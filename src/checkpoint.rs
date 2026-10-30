@@ -3,6 +3,7 @@
 //! which puts the feature's folder and the protected code back to one of them.
 
 use crate::config::{Event, Phase};
+use crate::deploy::exit_code;
 use crate::error::{bail, Result};
 use crate::paths::{flow_cmd, io_error};
 use crate::repo::{git, git_with, Repo};
@@ -10,6 +11,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 /// The phases a feature can be rewound to: ship's code may be committed, and a commit
 /// is not undone by putting files back.
@@ -174,5 +176,37 @@ pub fn rewind(repo: &Repo, args: &[String]) -> Result<i32> {
          entering it. The work this discarded is kept as {kept}: `git diff {kept}` shows it, \
          `git restore --source={kept} -- <path>` takes a file back. Continue with `{cmd} status`."
     );
+    if !run_resets(repo)? {
+        eprintln!(
+            "flow: rewound, but a reset failed: the environment may still hold what the \
+             discarded work left there. Fix it and run `{cmd} reset`."
+        );
+        return Ok(1);
+    }
     Ok(0)
+}
+
+/// `flow reset`: runs .flow.json's reset commands.
+pub fn reset(repo: &Repo) -> Result<i32> {
+    if repo.config.reset.is_empty() {
+        println!("no reset commands in .flow.json");
+        return Ok(0);
+    }
+    Ok(if run_resets(repo)? { 0 } else { 1 })
+}
+
+/// Runs the reset commands at the git root, in order, until one fails: whether all passed.
+fn run_resets(repo: &Repo) -> Result<bool> {
+    for command in &repo.config.reset {
+        println!("\n== [reset] {command}");
+        let mut sh = Command::new("/bin/sh");
+        sh.arg("-c").arg(command).current_dir(&repo.root).stdin(Stdio::null());
+        let status = sh.status().map_err(|e| crate::error::Error(format!("/bin/sh: {e}")))?;
+        let exit = exit_code(status);
+        if exit != 0 {
+            println!("== FAILED (exit {exit})");
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

@@ -31,6 +31,7 @@ default; `<work>` below).
 | `flow approve spec\|tickets\|review` | **user only** | sign off; stays valid until the file (for review, the code) changes |
 | `flow delegate <gates>` / `off` | **user only** | let the judge pass spec, tickets or review for this feature |
 | `flow rewind [<phase>]` | **user only** | discard the work since a phase began, back to its checkpoint (no phase: list them) |
+| `flow reset` | you | run `.flow.json`'s reset commands (a dev database back to match the code); rewind runs them too |
 | `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
 
 Never run the user-only commands, and never edit `<work>/flow.json` or
@@ -96,7 +97,9 @@ tickets cut the wrong way, code that wandered), say so and propose
 `! flow rewind <phase>`, naming the phase and what would be discarded. After a
 rewind, `flow status` shows where things are; start that phase afresh, taking
 from the attempt only what still holds (`git show
-refs/flow/<id>/attempt-<n>:<path>`).
+refs/flow/<id>/attempt-<n>:<path>`). A rewind runs `.flow.json`'s reset
+commands after putting the files back; if one fails it says so: fix the
+cause (Docker down, say) and run `flow reset`.
 
 ## Starting the living spec
 

@@ -183,6 +183,7 @@ fix it there. After three rejections the gate comes back to you, and
 | `flow delegate <gates…>` · `off`          | **you**    | let the judge pass gates for this feature, or stop it         |
 | `flow pause` · `flow resume`              | **you**    | suspend or restore enforcement                                |
 | `flow rewind [<phase>]`                   | **you**    | discard the work since a phase began (no phase: list checkpoints) |
+| `flow reset`                              | anyone     | run `.flow.json`'s reset commands (rewind runs them too)      |
 | `flow abandon`                            | **you**    | drop the active feature                                       |
 
 Run yours with the `!` prefix in Claude Code (`! flow approve spec`) or from a
