@@ -618,6 +618,55 @@ fn rewind_refuses_what_it_cant_put_back() {
 }
 
 #[test]
+fn a_push_in_ship_records_the_deploy_and_abandon_waits_for_its_undo() {
+    let t = Flow::new();
+    let deploy = json!({"provider": "command", "status_command": "echo []",
+        "record": "cat deployed.json", "undo": "deploy {version} again (it printed {before})"});
+    t.configure(json!({ "deploy": deploy }));
+    t.write("deployed.json", r#"{"version": "v1"}"#);
+    t.to_build();
+    assert_eq!(t.bash("git push"), None); // only a push in ship deploys the feature
+    t.write("lib/app.ex", "hello\n");
+    t.flow(&["gates"]);
+    t.flow(&["advance"]);
+    t.fwrite("review.md", REVIEW);
+    t.flow(&["advance"]);
+    assert!(t.state().get("effects").is_none());
+
+    // What can't be recorded couldn't be undone: the push waits.
+    fs::remove_file(t.path("deployed.json")).unwrap();
+    assert_in("cannot record what is deployed before the push", &denied(t.bash("git push")));
+    t.write("deployed.json", r#"{"version": "v1"}"#);
+    assert_eq!(t.bash("git push"), None);
+    assert_eq!(t.bash("git push"), None); // the first deploy is the one to put back
+    let effects = t.state()["effects"].clone();
+    assert_eq!(effects.as_array().unwrap().len(), 1, "{effects}");
+    assert_eq!(effects[0]["undo"], r#"deploy v1 again (it printed {"version": "v1"})"#);
+
+    t.write("deployed.json", r#"{"version": "v2"}"#);
+    assert_in("effects outside the repo: 1 to undo or keep", &t.flow(&["status"]).stdout);
+    let r = t.flow_any(&["abandon"]);
+    assert_in("that abandoning it would leave behind: 1 (deploy)", &r.stderr);
+    assert_eq!(t.phase(), "ship");
+    let prompt = t.flow(&["effects", "--prompt"]).stdout;
+    assert_in("deploy v1 again", &prompt);
+    assert_in("Undone when `cat deployed.json` prints", &prompt);
+    let r = t.flow_any(&["effects", "check"]);
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_in("1 deploy: not undone", &r.stdout);
+    t.write("deployed.json", "{\"version\":\"v1\"}\n"); // the same JSON, spaced otherwise
+    assert_in("1 deploy: undone", &t.flow(&["effects", "check"]).stdout);
+
+    // Another deploy; the user keeps it instead.
+    assert_eq!(t.bash("git push"), None);
+    assert_in("2 deploy", &t.flow(&["effects"]).stdout);
+    assert_in("are the user's", &denied(t.bash("flow accept 2")));
+    t.flow(&["accept", "2"]);
+    assert_in("nothing to undo", &t.flow(&["effects", "--prompt"]).stdout);
+    t.flow(&["abandon"]);
+}
+
+#[test]
 fn the_judge_gives_back_an_approval_a_rewind_dropped() {
     let mut t = Flow::new();
     let judge = Judge::new(&mut t);
@@ -1447,7 +1496,7 @@ fn assert_key_order(text: &str, keys: &[&str]) {
 }
 
 const DOC: &str = "flow — a phase-gated feature workflow for Claude Code.\n\n\
-commands: init, new, status, check, advance, back, approve, delegate, judge, gates, deploy, pause, resume, rewind, reset, abandon\n";
+commands: init, new, status, check, advance, back, approve, delegate, judge, gates, deploy, effects, accept, pause, resume, rewind, reset, abandon\n";
 
 #[test]
 fn help_and_usage_errors() {
@@ -1729,6 +1778,7 @@ fn init_writes_settings_and_config_json() {
         "Bash(flow resume:*)",
         "Bash(flow rewind:*)",
         "Bash(flow abandon:*)",
+        "Bash(flow accept:*)",
         "Edit(flow/flow.json)",
         "Edit(flow/*/state.json)",
     ]);
@@ -1789,7 +1839,7 @@ fn init_writes_settings_and_config_json() {
         "{\n  \"permissions\": {\n    \"deny\": [\n      \"Bash(flow approve:*)\",\n      \
          \"Bash(flow delegate:*)\",\n      \"Bash(flow pause:*)\",\n      \
          \"Bash(flow resume:*)\",\n      \"Bash(flow rewind:*)\",\n      \
-         \"Bash(flow abandon:*)\",\n      \
+         \"Bash(flow abandon:*)\",\n      \"Bash(flow accept:*)\",\n      \
          \"Edit(flow/flow.json)\",\n      \"Edit(flow/*/state.json)\"\n    ]\n  }\n}\n"
     );
 }
@@ -2041,7 +2091,7 @@ fn bash_edge_cases() {
     let commit = "flow: commit touches code (lib/x.ex) but 001-hello is in phase explore; \
                   code is committed only in ship";
     let user =
-        "flow: approve/delegate/pause/resume/rewind/abandon are the user's: they run them as `! ";
+        "flow: approve/delegate/pause/resume/rewind/abandon/accept are the user's: they run them as `! ";
     let wrong: Vec<String> = cases
         .into_iter()
         .filter_map(|(c, want)| {
@@ -2203,7 +2253,7 @@ fn flow_self_names_the_cli_when_flow_is_not_on_path() {
     );
     assert_eq!(
         denied(t.bash("flow approve spec")),
-        "flow: approve/delegate/pause/resume/rewind/abandon are the user's: they run them as `! tools/flow ...`"
+        "flow: approve/delegate/pause/resume/rewind/abandon/accept are the user's: they run them as `! tools/flow ...`"
     );
 
     // Outside it: the absolute path, symlinks resolved.

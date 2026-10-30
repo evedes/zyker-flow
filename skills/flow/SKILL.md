@@ -27,11 +27,13 @@ default; `<work>` below).
 | `flow back` | you | return to the previous phase (e.g. review found a problem) |
 | `flow gates` | you | in build: run standing gates + every ticket's Verification steps, record the result |
 | `flow deploy` | you | CI runs for HEAD and the health check |
+| `flow effects [--prompt\|check]` | you | the feature's deploys and how to undo them; `--prompt` the steps, `check` confirms an undo |
 | `flow judge` | you | in a gate the user delegated: have the judge approve or reject it |
 | `flow approve spec\|tickets\|review` | **user only** | sign off; stays valid until the file (for review, the code) changes |
 | `flow delegate <gates>` / `off` | **user only** | let the judge pass spec, tickets or review for this feature |
 | `flow rewind [<phase>]` | **user only** | discard the work since a phase began, back to its checkpoint (no phase: list them) |
 | `flow reset` | you | run `.flow.json`'s reset commands (a dev database back to match the code); rewind runs them too |
+| `flow accept <n>` | **user only** | keep effect n as it is, not undone |
 | `flow pause` / `resume` / `abandon` | **user only** | suspend enforcement, or drop the active feature |
 
 Never run the user-only commands, and never edit `<work>/flow.json` or
@@ -100,6 +102,13 @@ from the attempt only what still holds (`git show
 refs/flow/<id>/attempt-<n>:<path>`). A rewind runs `.flow.json`'s reset
 commands after putting the files back; if one fails it says so: fix the
 cause (Docker down, say) and run `flow reset`.
+
+A feature that deployed can't be abandoned or rewound until the deploy is
+undone or the user keeps it. When the user wants it undone, run `flow effects
+--prompt` and follow its steps, newest first, then `flow effects check`, which
+marks each one undone once its record command prints what it printed before.
+If a step can't be done, stop and tell the user; keeping it is theirs
+(`! flow accept <n>`).
 
 ## Starting the living spec
 
@@ -192,7 +201,9 @@ with one is missing or empty.
 6. **ship** — commit code and the `<work>` folder together (done refuses
    while the feature's folder has uncommitted changes). With a `deploy`
    section in `.flow.json`, push too: the push hook refuses while a CI/deploy
-   run is in flight. Watch with `flow deploy`; `flow advance` to **done** once
+   run is in flight. With `deploy.record` set, the push first records what is
+   deployed (the feature's first push only), with how to undo it, and is refused
+   if that can't be recorded. Watch with `flow deploy`; `flow advance` to **done** once
    CI is green for HEAD and the health check returns 200. Without one, ship
    ends once everything is committed. Moving to done rewrites `state.json`,
    merges the spec changes into `<work>/specs/` and commits both itself

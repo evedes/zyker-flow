@@ -63,7 +63,7 @@ nothing.
 - **The rules stay fixed.** While a feature is active, the agent can't edit
   `.flow.json`, the Claude settings, the standing agreement, the templates or
   the living spec.
-- **You keep the keys.** Only you can approve, pause, resume, rewind or abandon, and
+- **You keep the keys.** Only you can approve, pause, resume, rewind, abandon or keep a deploy, and
   the agent can't edit flow's state files. You can hand the spec, tickets or
   review approval to a read-only [judge](#-the-judge), and take it back at any
   time.
@@ -144,7 +144,9 @@ is filled in and no `TODO(flow)` placeholders are left. The agent can always
 `flow back` a phase, for example when review finds a problem. When starting
 again beats fixing, you can `! flow rewind <phase>`: the feature's files and
 code go back to how they were on entering that phase, and the discarded attempt
-is kept in git ([more on rewinding](docs/rewind.md)).
+is kept in git ([more on rewinding](docs/rewind.md)). A deploy in ship is
+recorded with how to undo it, and `abandon` waits until it is undone or you keep
+it ([the effect ledger](docs/effects.md)).
 
 ---
 
@@ -179,6 +181,8 @@ fix it there. After three rejections the gate comes back to you, and
 | `flow gates`                              | agent      | in build: run the gates and record the result                 |
 | `flow judge`                              | agent      | in a delegated gate: have the judge decide                    |
 | `flow deploy`                             | anyone     | recent CI runs and the health check                           |
+| `flow effects [--prompt\|check]`          | anyone     | the feature's deploys and how to undo them; `check` confirms an undo |
+| `flow accept <n>`                         | **you**    | keep effect n as it is (abandon and rewind then let it be)    |
 | `flow approve spec\|tickets\|review`      | **you**    | approve the current artifact (for review, the code as it is now) |
 | `flow delegate <gates…>` · `off`          | **you**    | let the judge pass gates for this feature, or stop it         |
 | `flow pause` · `flow resume`              | **you**    | suspend or restore enforcement                                |
@@ -229,6 +233,7 @@ Every key, the deploy providers and template overrides:
 | [the judge](docs/judge.md)                 | delegating approvals                                      |
 | [the living spec](docs/living-spec.md)     | `specs/`, spec changes, adopting flow in an existing repo |
 | [rewinding](docs/rewind.md)                | checkpoints, and discarding work to start a phase again   |
+| [the effect ledger](docs/effects.md)       | recording a deploy and undoing it                         |
 | [known limitations](docs/limitations.md)   | what flow doesn't catch yet                               |
 | [development](docs/development.md)         | source layout, tests, releasing                           |
 

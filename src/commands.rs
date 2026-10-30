@@ -7,6 +7,7 @@ use crate::config::{
     Gates, Judgement, Phase, State,
 };
 use crate::deploy::{self, exit_code};
+use crate::effects;
 use crate::error::{bail, Error, Result};
 use crate::judge::{self, Verdict, GATES, MAX_REJECTS};
 use crate::markdown::{gate_commands, Sections};
@@ -99,6 +100,7 @@ pub fn new(repo: &Repo, args: &[String]) -> Result<i32> {
         reviewed_fingerprint: None,
         delegated: None,
         judgements: None,
+        effects: None,
         extra: Extra::new(),
     };
     repo.save_state(&fid, &st)?;
@@ -163,6 +165,11 @@ pub fn status(repo: &Repo) -> Result<i32> {
         let stale = gates.passed && !repo.gates_current(&fid, &st)?;
         let note = if stale { " (stale: code or tickets changed since)" } else { "" };
         println!("gates: {result}{note}");
+    }
+    let open = st.effects.iter().flatten().filter(|e| e.open()).count();
+    if open > 0 {
+        let cmd = flow_cmd(&repo.root);
+        println!("effects outside the repo: {open} to undo or keep (`{cmd} effects`)");
     }
     let problems = check(repo, &fid, &st, true)?;
     if problems.is_empty() {
@@ -551,6 +558,9 @@ pub fn abandon(repo: &Repo) -> Result<i32> {
     let path = repo.fdir(fid).join("state.json");
     if path.is_file() {
         let mut st: State = read_json(&path)?;
+        if let Some(problem) = effects::open_problem(repo, fid, &st, "abandoning it") {
+            bail!("{problem}");
+        }
         st.phase = Phase::Abandoned;
         st.history.push(Event::now(Phase::Abandoned));
         repo.save_state(fid, &st)?;

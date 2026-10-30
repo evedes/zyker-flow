@@ -14,7 +14,9 @@
     "forgejo_url": "https://forgejo.example.com",
     "repo": "owner/app",
     "token_env": "FORGEJO_TOKEN",
-    "health_url": "https://app.example.com/health"
+    "health_url": "https://app.example.com/health",
+    "record": "curl -fsS https://app.example.com/version",
+    "undo": "Deploy {commit} again and roll the database back to {migration}."
   }
 }
 ```
@@ -70,6 +72,12 @@ with every CI run for HEAD passed: flow assumes HEAD is pushed straight to
 wrong shape (Forgejo's not a JSON object or its `workflow_runs` not a list,
 `gh` output missing fields) is a provider error; `flow deploy` shows a
 completed `gh` run without a conclusion as `None`.
+
+`record` and `undo` (optional) keep the [effect ledger](effects.md): `record`
+is a shell command, run with `/bin/sh` at the git root, stdin closed, 30 s at
+most, that prints what is deployed; `undo` says how to put that back, with
+`{before}` for what `record` printed and `{<key>}` for a field of it when it is
+a JSON object.
 
 `flow deploy` lists the last 15 CI runs (`*` marks HEAD) and the health check.
 

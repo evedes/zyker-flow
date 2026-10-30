@@ -69,6 +69,11 @@ pub struct Deploy {
     pub status_command: Option<StatusCommand>,
     pub branch: Option<String>,
     pub health_url: Option<String>,
+    /// A command that prints what is deployed, run before each push in ship.
+    pub record: Option<String>,
+    /// How to put back what `record` printed: `{before}` is its output, `{<key>}` a
+    /// field of it when it is a JSON object.
+    pub undo: Option<String>,
     /// As in [`Config`]: an object only.
     #[serde(flatten)]
     _rest: Extra,
@@ -199,6 +204,9 @@ pub struct State {
     pub delegated: Option<BTreeMap<String, Delegation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judgements: Option<Vec<Judgement>>,
+    /// What the feature did outside the repo, with how to undo it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Vec<Effect>>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -287,6 +295,34 @@ pub struct Judgement {
     pub basis: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// An effect outside the repo: so far, a deploy.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Effect {
+    pub kind: String,
+    pub at: String,
+    /// The command that tells whether it is undone: it prints `before` again.
+    pub record: String,
+    /// What `record` printed before the effect.
+    pub before: String,
+    /// How to undo it, its placeholders filled in.
+    pub undo: String,
+    /// When `flow effects check` found it undone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undone: Option<String>,
+    /// When the user kept it (`flow accept`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl Effect {
+    /// Neither undone nor kept.
+    pub fn open(&self) -> bool {
+        self.undone.is_none() && self.accepted.is_none()
+    }
 }
 
 /// An entry in a feature's history.

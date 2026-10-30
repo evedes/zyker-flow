@@ -4,6 +4,7 @@
 
 use crate::config::{Event, Phase};
 use crate::deploy::exit_code;
+use crate::effects;
 use crate::error::{bail, Result};
 use crate::paths::{flow_cmd, io_error};
 use crate::repo::{git, git_with, Repo};
@@ -94,6 +95,9 @@ pub fn rewind(repo: &Repo, args: &[String]) -> Result<i32> {
     let at = |p: Phase| Phase::ALL.iter().position(|&q| q == p);
     if args.len() > 1 || at(target) > at(st.phase) {
         bail!("{fid} is in {}; it can be rewound to that phase or an earlier one", st.phase);
+    }
+    if let Some(problem) = effects::open_problem(repo, &fid, &st, "a rewind") {
+        bail!("{problem}");
     }
     let Some(snap) = resolve(repo, &ref_name(&fid, target.name())) else {
         bail!("{fid} has no checkpoint for {target} (it was entered before flow kept them)");

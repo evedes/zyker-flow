@@ -3,6 +3,7 @@
 use crate::checks::check;
 use crate::config::{given, Phase};
 use crate::deploy::{self, run_list};
+use crate::effects;
 use crate::error::{bail, Error, Result};
 use crate::paths::flow_cmd;
 use crate::primer::primer;
@@ -178,7 +179,13 @@ impl Target {
             }
         }
         if self.codegen || self.writes_code {
-            return code_edit_problem(repo);
+            if let Some(problem) = code_edit_problem(repo)? {
+                return Ok(Some(problem));
+            }
+        }
+        // Last, so only a push nothing else refuses is recorded.
+        if self.pushes {
+            return effects::before_push(repo);
         }
         Ok(None)
     }

@@ -23,6 +23,7 @@ mod checks;
 mod commands;
 mod config;
 mod deploy;
+mod effects;
 mod error;
 mod hooks;
 mod judge;
@@ -46,9 +47,9 @@ fn is_space(c: char) -> bool {
 
 const SUMMARY: &str = "flow — a phase-gated feature workflow for Claude Code.";
 
-const COMMANDS: [&str; 16] = [
+const COMMANDS: [&str; 18] = [
     "init", "new", "status", "check", "advance", "back", "approve", "delegate", "judge", "gates",
-    "deploy", "pause", "resume", "rewind", "reset", "abandon",
+    "deploy", "effects", "accept", "pause", "resume", "rewind", "reset", "abandon",
 ];
 
 /// Runs `f` with a panic turned into an error: a hook must fail closed, not crash.
@@ -103,6 +104,8 @@ fn run(name: &str, args: &[String]) -> Result<i32> {
         "judge" => commands::judge(&repo),
         "gates" => commands::gates(&repo),
         "deploy" => commands::deploy(&repo),
+        "effects" => effects::effects(&repo, args),
+        "accept" => effects::accept(&repo, args),
         "pause" => commands::pause(&repo, true),
         "resume" => commands::pause(&repo, false),
         "rewind" => checkpoint::rewind(&repo, args),

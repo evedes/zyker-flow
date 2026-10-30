@@ -190,9 +190,15 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
     })
 }
 
-/// Runs `cmd` in `root` for at most 30 seconds (until it exits and closes its output)
-/// and parses its stdout as JSON.
-fn run_json(mut cmd: Command, root: &Path, what: &str) -> Result<Value> {
+/// Runs `cmd` in `root` for at most 30 seconds and parses its stdout as JSON.
+fn run_json(cmd: Command, root: &Path, what: &str) -> Result<Value> {
+    let stdout = run_output(cmd, root, what)?;
+    serde_json::from_slice(&stdout).map_err(|_| Error(format!("{what} did not print JSON")))
+}
+
+/// Runs `cmd` in `root` for at most 30 seconds (until it exits and closes its output):
+/// its stdout, when it succeeds.
+pub fn run_output(mut cmd: Command, root: &Path, what: &str) -> Result<Vec<u8>> {
     let fail = |e: &dyn Display| Error(format!("{what} failed: {e}"));
     cmd.current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| fail(&e))?;
@@ -217,5 +223,5 @@ fn run_json(mut cmd: Command, root: &Path, what: &str) -> Result<Value> {
         let stderr: String = stderr.trim().chars().take(200).collect();
         bail!("{what} failed (exit {}): {stderr}", exit_code(status));
     }
-    serde_json::from_slice(&stdout).map_err(|_| Error(format!("{what} did not print JSON")))
+    Ok(stdout)
 }

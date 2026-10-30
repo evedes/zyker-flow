@@ -48,7 +48,8 @@ phase or an earlier one):
 
 It refuses when protected code was committed since the checkpoint (in ship,
 say): putting files back doesn't undo a commit. That is also why ship can't be
-rewound to.
+rewound to. It refuses too while the feature has a deploy neither undone nor
+kept ([the effect ledger](effects.md)).
 
 Rewinding to explore is starting over: research, spec, tickets and code all go
 back to the feature's first moment, with the attempt kept.
